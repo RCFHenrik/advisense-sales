@@ -62,6 +62,7 @@ class EmployeeSelfUpdate(BaseModel):
     """Fields any employee may update on their own profile."""
     profile_description: Optional[str] = None
     domain_expertise_tags: Optional[str] = None
+    seniority: Optional[str] = None
 
 
 class EmployeeTargetUpdate(BaseModel):

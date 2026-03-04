@@ -3,11 +3,22 @@ import { useAuth } from '../context/AuthContext';
 import api from '../api/client';
 import type { Employee } from '../types';
 
+const SENIORITY_OPTIONS = [
+  'Junior Associate',
+  'Associate',
+  'Senior Associate',
+  'Manager',
+  'Senior Manager',
+  'Director',
+  'Managing Director',
+];
+
 export default function ProfilePage() {
   const { user } = useAuth();
   const [profile, setProfile] = useState<Employee | null>(null);
   const [profileDescription, setProfileDescription] = useState('');
   const [expertiseTags, setExpertiseTags] = useState('');
+  const [seniority, setSeniority] = useState('');
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState('');
@@ -17,6 +28,7 @@ export default function ProfilePage() {
       const emp: Employee = r.data;
       setProfile(emp);
       setProfileDescription(emp.profile_description || '');
+      setSeniority(emp.seniority || '');
       if (emp.domain_expertise_tags) {
         try {
           const tags = JSON.parse(emp.domain_expertise_tags);
@@ -40,6 +52,7 @@ export default function ProfilePage() {
       await api.patch('/employees/me', {
         profile_description: profileDescription,
         domain_expertise_tags: JSON.stringify(tagsArray),
+        seniority: seniority || null,
       });
       setSaved(true);
     } catch {
@@ -79,7 +92,18 @@ export default function ProfilePage() {
               <dt style={{ color: '#718096', fontWeight: 500 }}>Role:</dt>
               <dd>{roleLabel(profile.role)}</dd>
               <dt style={{ color: '#718096', fontWeight: 500 }}>Seniority:</dt>
-              <dd style={{ textTransform: 'capitalize' }}>{profile.seniority || '—'}</dd>
+              <dd>
+                <select
+                  value={seniority}
+                  onChange={(e) => { setSeniority(e.target.value); setSaved(false); }}
+                  style={{ width: '100%', padding: '4px 6px', borderRadius: 4, border: '1px solid #e2e8f0', fontSize: 14 }}
+                >
+                  <option value="">Other (no seniority)</option>
+                  {SENIORITY_OPTIONS.map((s) => (
+                    <option key={s} value={s}>{s}</option>
+                  ))}
+                </select>
+              </dd>
               <dt style={{ color: '#718096', fontWeight: 500 }}>Team:</dt>
               <dd>{profile.team_name || '—'}</dd>
               <dt style={{ color: '#718096', fontWeight: 500 }}>Business Area:</dt>
