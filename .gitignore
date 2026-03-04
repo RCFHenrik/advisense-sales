@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+venv/
+.venv/
+*.egg-info/
+
+# Databas — INTE i git (innehåller kontaktdata)
+backend/database/*.db
+backend/database/*.db-shm
+backend/database/*.db-wal
+
+# Miljövariabler
+.env
+.env.local
+.env.*.local
+
+# Node
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# OS / editor / Windows-reserverade namn
+.DS_Store
+Thumbs.db
+nul
+.vscode/
+.idea/
+*.swp
+
+# Claude-intern
+memory/
+.claude/
