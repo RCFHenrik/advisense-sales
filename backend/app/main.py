@@ -54,3 +54,14 @@ app.include_router(meetings.router, prefix="/api/meetings", tags=["Meetings"])
 @app.get("/api/health")
 def health_check():
     return {"status": "ok", "version": settings.APP_VERSION}
+
+
+# ── Production: serve the built React app as static files (Railway) ──────────
+import os
+from fastapi.staticfiles import StaticFiles
+
+_dist = os.path.normpath(
+    os.path.join(os.path.dirname(__file__), "..", "..", "frontend", "dist")
+)
+if os.path.isdir(_dist):
+    app.mount("/", StaticFiles(directory=_dist, html=True), name="spa")
