@@ -8,7 +8,7 @@ from sqlalchemy import func, or_
 from app.models.models import (
     Contact, Employee, OutreachRecord, OutreachStatusEnum,
     SuppressionEntry, Meeting, SystemConfig, ContactStatusEnum,
-    HotTopic,
+    HotTopic, ClassificationLookup,
 )
 from app.core.config import settings
 from app.services.scoring import ScoringService
@@ -199,6 +199,51 @@ class RecommendationService:
             meeting_bonus = min(meeting_bonus, 40)
             score += meeting_bonus
             reasons.append(f"Previous meetings: {previous_meetings} (+{int(meeting_bonus)} pts)")
+
+        # Classification data match (data-driven from historical meetings)
+        if contact.job_title and contact.group_domicile:
+            classification = (
+                self.db.query(ClassificationLookup)
+                .filter(
+                    ClassificationLookup.job_title == contact.job_title,
+                    ClassificationLookup.client_group_domicile == contact.group_domicile,
+                )
+            )
+            if contact.client_tier:
+                classification = classification.filter(
+                    ClassificationLookup.client_tier == contact.client_tier,
+                )
+            if contact.sector:
+                classification = classification.filter(
+                    ClassificationLookup.client_industry == contact.sector,
+                )
+            cl = classification.first()
+
+            if cl:
+                emp_name_lower = employee.name.lower() if employee.name else ""
+                emp_team = employee.team.name.lower() if employee.team else ""
+                emp_ba = employee.business_area.name.lower() if employee.business_area else ""
+
+                if cl.top_registrator_1 and cl.top_registrator_1.lower() in emp_name_lower:
+                    score += 25
+                    reasons.append(f"Top registrator for this profile (+25 pts)")
+                elif cl.top_registrator_2 and cl.top_registrator_2.lower() in emp_name_lower:
+                    score += 15
+                    reasons.append(f"2nd registrator for this profile (+15 pts)")
+
+                if cl.top_team_1 and cl.top_team_1.lower() == emp_team:
+                    score += 10
+                    reasons.append(f"Top team for this profile (+10 pts)")
+                elif cl.top_team_2 and cl.top_team_2.lower() == emp_team:
+                    score += 5
+                    reasons.append(f"2nd team for this profile (+5 pts)")
+
+                if cl.top_ba_1 and cl.top_ba_1.lower() == emp_ba:
+                    score += 10
+                    reasons.append(f"Top BA for this profile (+10 pts)")
+                elif cl.top_ba_2 and cl.top_ba_2.lower() == emp_ba:
+                    score += 5
+                    reasons.append(f"2nd BA for this profile (+5 pts)")
 
         # Profile description keyword match
         if employee.profile_description and (contact.responsibility_domain or contact.sector):

@@ -141,6 +141,7 @@ class ContactOut(BaseModel):
     email: Optional[str] = None
     job_title: Optional[str] = None
     company_name: Optional[str] = None
+    client_name: Optional[str] = None
     sector: Optional[str] = None
     client_tier: Optional[str] = None
     responsibility_domain: Optional[str] = None

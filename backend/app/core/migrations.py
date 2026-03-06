@@ -81,3 +81,80 @@ def run_migrations():
                 "ALTER TABLE employees ADD COLUMN outreach_target_per_month INTEGER"
             ))
             conn.commit()
+
+        # ── Contact: add client_name column if missing ────────────────────────
+        c_cols2 = [r[1] for r in conn.execute(text("PRAGMA table_info(contacts)")).fetchall()]
+        if "client_name" not in c_cols2:
+            conn.execute(text("ALTER TABLE contacts ADD COLUMN client_name TEXT"))
+            conn.commit()
+
+        # ── Meeting: add new columns if missing ──────────────────────────────
+        m_cols = [r[1] for r in conn.execute(text("PRAGMA table_info(meetings)")).fetchall()]
+        for col in ("business_area", "team", "site", "client_name", "sector"):
+            if col not in m_cols:
+                conn.execute(text(f"ALTER TABLE meetings ADD COLUMN {col} TEXT"))
+        conn.commit()
+
+        # ── JobTitleDomain table ─────────────────────────────────────────────
+        tables = [r[0] for r in conn.execute(text(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )).fetchall()]
+
+        if "jobtitle_domains" not in tables:
+            conn.execute(text("""
+                CREATE TABLE jobtitle_domains (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    job_title VARCHAR(500) NOT NULL,
+                    domain VARCHAR(300),
+                    created_at DATETIME,
+                    updated_at DATETIME
+                )
+            """))
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_jobtitle_domains_job_title ON jobtitle_domains(job_title)"
+            ))
+            conn.commit()
+
+        # ── ClassificationLookup table ───────────────────────────────────────
+        if "classification_lookups" not in tables:
+            conn.execute(text("""
+                CREATE TABLE classification_lookups (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    job_title VARCHAR(500),
+                    client_group_domicile VARCHAR(100),
+                    client_tier VARCHAR(50),
+                    client_industry VARCHAR(200),
+                    num_contacts INTEGER,
+                    meetings_total INTEGER,
+                    top_ba_1 VARCHAR(200),
+                    top_ba_1_count INTEGER,
+                    top_ba_1_share REAL,
+                    top_ba_2 VARCHAR(200),
+                    top_ba_2_count INTEGER,
+                    top_ba_2_share REAL,
+                    top_team_1 VARCHAR(200),
+                    top_team_1_count INTEGER,
+                    top_team_1_share REAL,
+                    top_team_2 VARCHAR(200),
+                    top_team_2_count INTEGER,
+                    top_team_2_share REAL,
+                    top_registrator_1 VARCHAR(200),
+                    top_registrator_1_count INTEGER,
+                    top_registrator_1_share REAL,
+                    top_registrator_2 VARCHAR(200),
+                    top_registrator_2_count INTEGER,
+                    top_registrator_2_share REAL,
+                    meetings_jra_sa INTEGER,
+                    meetings_manager INTEGER,
+                    meetings_senior_manager INTEGER,
+                    meetings_director INTEGER,
+                    meetings_managing_director INTEGER,
+                    meetings_other INTEGER,
+                    created_at DATETIME
+                )
+            """))
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_classification_lookup "
+                "ON classification_lookups(job_title, client_group_domicile, client_tier, client_industry)"
+            ))
+            conn.commit()

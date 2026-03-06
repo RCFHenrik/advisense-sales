@@ -280,7 +280,12 @@ export default function ContactsPage() {
                       <div style={{ fontWeight: 500 }}>{c.full_name || `${c.first_name} ${c.last_name}`}</div>
                       <div style={{ fontSize: 12, color: '#718096' }}>{c.email}</div>
                     </td>
-                    <td>{c.company_name}</td>
+                    <td>
+                      <div>{c.company_name}</div>
+                      {c.client_name && c.client_name !== c.company_name && (
+                        <div style={{ fontSize: 12, color: '#718096' }}>{c.client_name}</div>
+                      )}
+                    </td>
                     <td>{c.job_title}</td>
                     <td>{tierBadge(c.client_tier)}</td>
                     <td>{c.responsibility_domain}</td>

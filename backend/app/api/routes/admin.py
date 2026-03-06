@@ -173,6 +173,18 @@ def update_column_mapping(
     return ColumnMappingOut.model_validate(m)
 
 
+@router.post("/column-mappings/reset")
+def reset_column_mappings(
+    file_type: str = Query(..., description="File type to reset: contacts, meetings"),
+    db: Session = Depends(get_db),
+    current_user: Employee = Depends(require_role(RoleEnum.ADMIN, RoleEnum.BA_MANAGER)),
+):
+    """Delete all column mappings for a file type, forcing fresh defaults on next upload."""
+    deleted = db.query(ColumnMapping).filter(ColumnMapping.file_type == file_type).delete()
+    db.commit()
+    return {"status": "reset", "file_type": file_type, "deleted": deleted}
+
+
 # ── System Config ─────────────────────────────────────────────────────
 
 @router.get("/config", response_model=List[SystemConfigOut])

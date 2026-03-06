@@ -41,6 +41,7 @@ export interface Contact {
   email?: string;
   job_title?: string;
   company_name?: string;
+  client_name?: string;
   sector?: string;
   client_tier?: string;
   responsibility_domain?: string;
