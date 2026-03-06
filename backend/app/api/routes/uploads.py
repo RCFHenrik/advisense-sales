@@ -9,7 +9,7 @@ from app.core.database import get_db
 from app.core.auth import get_current_user, require_role
 from app.models.models import Employee, RoleEnum, FileUpload
 from app.services.excel_import import ExcelImportService
-from app.schemas.schemas import FileUploadOut, UploadDiffSummary
+from app.schemas.schemas import FileUploadOut, UploadDiffSummary, ConsultantUploadSummary
 
 router = APIRouter()
 
@@ -148,6 +148,39 @@ async def upload_classification(
     return summary
 
 
+@router.post("/consultants", response_model=ConsultantUploadSummary)
+async def upload_consultants(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: Employee = Depends(require_role(RoleEnum.ADMIN, RoleEnum.BA_MANAGER)),
+):
+    if not file.filename.endswith(ALLOWED_DATA_EXTENSIONS):
+        raise HTTPException(status_code=400, detail="Only .xlsx, .xls, or .csv files are accepted")
+
+    content = await file.read()
+    service = ExcelImportService(db)
+    batch_id = str(uuid.uuid4())[:8]
+
+    try:
+        summary = service.import_consultants(content, batch_id, current_user.id, filename=file.filename)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    db.add(FileUpload(
+        file_type="consultants",
+        filename=file.filename,
+        row_count=summary.total_rows,
+        added_count=summary.added,
+        updated_count=0,
+        removed_count=summary.skipped_duplicate,
+        uploaded_by_id=current_user.id,
+        batch_id=batch_id,
+    ))
+    db.commit()
+
+    return summary
+
+
 @router.get("/history")
 def upload_history(
     file_type: Optional[str] = None,
@@ -160,3 +193,16 @@ def upload_history(
 
     uploads = query.order_by(FileUpload.uploaded_at.desc()).limit(50).all()
     return [FileUploadOut.model_validate(u) for u in uploads]
+
+
+@router.delete("/history/{upload_id}", status_code=204)
+def delete_upload_record(
+    upload_id: int,
+    db: Session = Depends(get_db),
+    current_user: Employee = Depends(require_role(RoleEnum.ADMIN)),
+):
+    record = db.query(FileUpload).filter(FileUpload.id == upload_id).first()
+    if not record:
+        raise HTTPException(status_code=404, detail="Upload record not found")
+    db.delete(record)
+    db.commit()

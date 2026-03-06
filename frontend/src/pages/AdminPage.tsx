@@ -1,9 +1,9 @@
 import { useState, useEffect } from 'react';
 import api from '../api/client';
-import type { SystemConfigItem, ColumnMapping } from '../types';
+import type { SystemConfigItem, ColumnMapping, SiteLanguageItem } from '../types';
 
 export default function AdminPage() {
-  const [tab, setTab] = useState<'config' | 'mappings' | 'suppression' | 'audit'>('config');
+  const [tab, setTab] = useState<'config' | 'mappings' | 'suppression' | 'audit' | 'languages'>('config');
   const [configs, setConfigs] = useState<SystemConfigItem[]>([]);
   const [mappings, setMappings] = useState<ColumnMapping[]>([]);
   const [suppression, setSuppression] = useState<any[]>([]);
@@ -12,11 +12,18 @@ export default function AdminPage() {
   const [editValue, setEditValue] = useState('');
   const [configError, setConfigError] = useState('');
 
+  // Site languages state
+  const [siteLanguages, setSiteLanguages] = useState<SiteLanguageItem[]>([]);
+  const [newLangName, setNewLangName] = useState('');
+  const [newLangCode, setNewLangCode] = useState('');
+  const [langSaving, setLangSaving] = useState(false);
+
   useEffect(() => {
     if (tab === 'config') api.get('/admin/config').then((r) => setConfigs(r.data)).catch(() => {});
     if (tab === 'mappings') api.get('/admin/column-mappings').then((r) => setMappings(r.data)).catch(() => {});
     if (tab === 'suppression') api.get('/admin/suppression-list').then((r) => setSuppression(r.data)).catch(() => {});
     if (tab === 'audit') api.get('/admin/audit-log').then((r) => setAuditLog(r.data)).catch(() => {});
+    if (tab === 'languages') api.get('/admin/site-languages').then((r) => setSiteLanguages(r.data)).catch(() => {});
   }, [tab]);
 
   const handleSaveConfig = async (key: string) => {
@@ -42,11 +49,40 @@ export default function AdminPage() {
     }
   };
 
+  const handleAddLanguage = async () => {
+    if (!newLangName.trim()) return;
+    setLangSaving(true);
+    setConfigError('');
+    try {
+      const res = await api.post('/admin/site-languages', {
+        name: newLangName.trim(),
+        code: newLangCode.trim() || null,
+      });
+      setSiteLanguages((prev) => [...prev, res.data].sort((a, b) => a.name.localeCompare(b.name)));
+      setNewLangName('');
+      setNewLangCode('');
+    } catch (err: any) {
+      setConfigError(err.response?.data?.detail || 'Failed to add language');
+    } finally {
+      setLangSaving(false);
+    }
+  };
+
+  const handleDeleteLanguage = async (id: number) => {
+    setConfigError('');
+    try {
+      await api.delete(`/admin/site-languages/${id}`);
+      setSiteLanguages((prev) => prev.filter((l) => l.id !== id));
+    } catch {
+      setConfigError('Failed to delete language.');
+    }
+  };
+
   return (
     <div>
       <div className="page-header">
         <h2>Administration</h2>
-        <p>System configuration, column mappings, and audit logs</p>
+        <p>System configuration, column mappings, site languages, and audit logs</p>
       </div>
 
       <div className="tabs">
@@ -55,6 +91,9 @@ export default function AdminPage() {
         </button>
         <button className={`tab ${tab === 'mappings' ? 'active' : ''}`} onClick={() => setTab('mappings')}>
           Column Mappings
+        </button>
+        <button className={`tab ${tab === 'languages' ? 'active' : ''}`} onClick={() => setTab('languages')}>
+          Site Languages
         </button>
         <button className={`tab ${tab === 'suppression' ? 'active' : ''}`} onClick={() => setTab('suppression')}>
           Suppression List
@@ -143,6 +182,93 @@ export default function AdminPage() {
                 ))}
               </tbody>
             </table>
+          </div>
+        </div>
+      )}
+
+      {tab === 'languages' && (
+        <div className="card">
+          <div className="card-header">Site Languages</div>
+          <div className="card-body">
+            <div style={{ fontSize: 13, color: '#718096', marginBottom: 16 }}>
+              Configure the available site languages. Consultants can select these on their profile for outreach matching.
+            </div>
+
+            {configError && (
+              <div style={{ marginBottom: 12, padding: 8, background: '#fff5f5', borderRadius: 4, color: '#c53030', fontSize: 13 }}>
+                {configError}
+              </div>
+            )}
+
+            {/* Add new language form */}
+            <div style={{ display: 'flex', gap: 8, marginBottom: 16, alignItems: 'flex-end' }}>
+              <div>
+                <label style={{ display: 'block', fontSize: 12, color: '#4a5568', marginBottom: 4 }}>Language Name *</label>
+                <input
+                  className="form-control"
+                  placeholder="e.g. Swedish"
+                  value={newLangName}
+                  onChange={(e) => setNewLangName(e.target.value)}
+                  style={{ width: 180 }}
+                  onKeyDown={(e) => { if (e.key === 'Enter') handleAddLanguage(); }}
+                />
+              </div>
+              <div>
+                <label style={{ display: 'block', fontSize: 12, color: '#4a5568', marginBottom: 4 }}>Code</label>
+                <input
+                  className="form-control"
+                  placeholder="e.g. sv"
+                  value={newLangCode}
+                  onChange={(e) => setNewLangCode(e.target.value)}
+                  style={{ width: 80 }}
+                  onKeyDown={(e) => { if (e.key === 'Enter') handleAddLanguage(); }}
+                />
+              </div>
+              <button
+                className="btn btn-primary"
+                onClick={handleAddLanguage}
+                disabled={langSaving || !newLangName.trim()}
+              >
+                {langSaving ? 'Adding...' : 'Add Language'}
+              </button>
+            </div>
+
+            {/* Language list */}
+            <div className="table-wrapper">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Name</th>
+                    <th>Code</th>
+                    <th style={{ width: 1 }}></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {siteLanguages.length === 0 ? (
+                    <tr><td colSpan={3} className="empty-state">No site languages configured</td></tr>
+                  ) : (
+                    siteLanguages.map((l) => (
+                      <tr key={l.id}>
+                        <td style={{ fontWeight: 500 }}>{l.name}</td>
+                        <td style={{ fontFamily: 'monospace', fontSize: 13, color: '#718096' }}>
+                          {l.code || '—'}
+                        </td>
+                        <td>
+                          <button
+                            className="btn btn-sm btn-outline"
+                            style={{ color: 'var(--danger, #e53e3e)', borderColor: 'var(--danger, #e53e3e)', padding: '2px 8px', fontSize: 12 }}
+                            onClick={() => handleDeleteLanguage(l.id)}
+                            title="Remove language"
+                          >
+                            Remove
+                          </button>
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
           </div>
         </div>
       )}

@@ -52,8 +52,9 @@ body {
 }
 
 .sidebar-header {
-  padding: 24px 20px;
+  padding: 20px 6px 16px;
   border-bottom: 1px solid rgba(255,255,255,0.1);
+  text-align: center;
 }
 
 .sidebar-header h1 {
@@ -63,9 +64,12 @@ body {
 }
 
 .sidebar-header .subtitle {
-  font-size: 12px;
-  opacity: 0.7;
-  margin-top: 2px;
+  font-size: 11.5px;
+  opacity: 1;
+  color: #ffffff;
+  margin-top: -6px;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
 }
 
 .sidebar-nav {
@@ -147,6 +151,8 @@ body {
   flex: 1;
   padding: 24px 28px;
   max-width: 1600px;
+  min-width: 0;
+  overflow-x: hidden;
 }
 
 /* ── Page header ──────────────────────────────────────── */
@@ -476,36 +482,66 @@ textarea.form-control {
   align-items: center;
   justify-content: center;
   min-height: 100vh;
-  background: linear-gradient(135deg, var(--primary) 0%, #2d3748 100%);
+  background: #000000;
 }
 
 .login-card {
-  background: white;
+  display: flex;
+  flex-direction: column;
+  background: rgba(255,255,255,0.06);
+  border: 1px solid rgba(255,255,255,0.1);
   border-radius: 12px;
   padding: 40px;
   width: 400px;
-  box-shadow: 0 20px 40px rgba(0,0,0,0.2);
+  box-shadow: 0 20px 60px rgba(0,0,0,0.5);
 }
 
 .login-card h1 {
   font-size: 24px;
-  color: var(--primary);
+  color: #ffffff;
   margin-bottom: 4px;
 }
 
 .login-card .subtitle {
-  color: var(--text-secondary);
+  color: rgba(255,255,255,0.5);
   margin-bottom: 24px;
+  text-align: center;
+}
+
+.login-card label {
+  color: rgba(255,255,255,0.7);
+}
+
+.login-card .form-control {
+  background: rgba(255,255,255,0.08);
+  border-color: rgba(255,255,255,0.15);
+  color: #ffffff;
+}
+
+.login-card .form-control::placeholder {
+  color: rgba(255,255,255,0.3);
+}
+
+.login-card .form-control:focus {
+  border-color: var(--accent);
+  background: rgba(255,255,255,0.1);
 }
 
 .login-card .btn {
   width: 100%;
   justify-content: center;
   padding: 10px;
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.login-card .btn:hover {
+  background: var(--accent-light);
+  border-color: var(--accent-light);
 }
 
 .login-error {
-  color: var(--danger);
+  color: #fc8181;
   font-size: 13px;
   margin-bottom: 12px;
 }
@@ -618,4 +654,8 @@ textarea.form-control {
   .stats-grid {
     grid-template-columns: repeat(2, 1fr);
   }
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
 }

@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.core.auth import create_access_token, get_current_user
 from app.models.models import Employee
-from app.schemas.schemas import LoginRequest, TokenResponse, EmployeeOut
+from app.schemas.schemas import LoginRequest, TokenResponse, EmployeeOut, EmployeeSiteLanguageOut
 
 router = APIRouter()
 
@@ -20,6 +20,15 @@ def _verify_password(plain: str, hashed: str) -> bool:
 
 
 def _employee_to_out(emp: Employee) -> EmployeeOut:
+    sl_list = []
+    for esl in (emp.site_languages or []):
+        if esl.site_language and esl.site_language.is_active:
+            sl_list.append(EmployeeSiteLanguageOut(
+                id=esl.id,
+                site_language_id=esl.site_language_id,
+                name=esl.site_language.name,
+                code=esl.site_language.code,
+            ))
     return EmployeeOut(
         id=emp.id,
         name=emp.name,
@@ -29,13 +38,18 @@ def _employee_to_out(emp: Employee) -> EmployeeOut:
         primary_language=emp.primary_language,
         domain_expertise_tags=emp.domain_expertise_tags,
         outreach_target_per_week=emp.outreach_target_per_week,
+        outreach_target_per_month=emp.outreach_target_per_month,
         is_active=emp.is_active,
+        approval_status=emp.approval_status,
+        profile_description=emp.profile_description,
         team_id=emp.team_id,
         business_area_id=emp.business_area_id,
         site_id=emp.site_id,
         team_name=emp.team.name if emp.team else None,
         business_area_name=emp.business_area.name if emp.business_area else None,
         site_name=emp.site.name if emp.site else None,
+        uploaded_batch_id=emp.uploaded_batch_id,
+        site_languages=sl_list,
         created_at=emp.created_at,
     )
 

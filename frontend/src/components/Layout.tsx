@@ -6,11 +6,10 @@ const NAV_ITEMS = [
   { path: '/', label: 'Dashboard', icon: '📊' },
   { path: '/contacts', label: 'Contacts', icon: '👥' },
   { path: '/outreach', label: 'Outreach', icon: '✉️' },
-  { section: 'Management' },
+  { section: 'Administration' },
   { path: '/templates', label: 'Email Templates', icon: '📝' },
   { path: '/upload', label: 'Data Upload', icon: '📤' },
   { path: '/employees', label: 'Consultants', icon: '🏢' },
-  { section: 'Administration' },
   { path: '/admin', label: 'Settings', icon: '⚙️' },
 ];
 
@@ -30,8 +29,8 @@ export default function Layout({ children }: { children: React.ReactNode }) {
     <div className="app-layout">
       <aside className="sidebar">
         <div className="sidebar-header">
-          <h1>ADVISENSE</h1>
-          <div className="subtitle">Sales Coordination</div>
+          <img src="/advisense_white.png" alt="Advisense" style={{ width: '110%', marginLeft: '-5%', marginBottom: 4 }} />
+          <div className="subtitle">Sales Orchestration</div>
         </div>
 
         <nav className="sidebar-nav">
@@ -39,7 +38,6 @@ export default function Layout({ children }: { children: React.ReactNode }) {
             if ('section' in item && !('path' in item)) {
               // Hide admin section for consultants
               if (item.section === 'Administration' && user?.role === 'consultant') return null;
-              if (item.section === 'Management' && user?.role === 'consultant') return null;
               return <div key={i} className="sidebar-section">{item.section}</div>;
             }
 
