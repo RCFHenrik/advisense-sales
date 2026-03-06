@@ -11,6 +11,22 @@ export type NegationReason =
   | 'not_appropriate_timing' | 'another_consultant_better'
   | 'duplicate_ongoing' | 'do_not_contact';
 
+export type ApprovalStatus = 'pending' | 'approved' | 'rejected';
+
+export interface SiteLanguageItem {
+  id: number;
+  name: string;
+  code?: string;
+  is_active: boolean;
+}
+
+export interface EmployeeSiteLanguage {
+  id: number;
+  site_language_id: number;
+  name: string;
+  code?: string;
+}
+
 export interface Employee {
   id: number;
   name: string;
@@ -23,12 +39,15 @@ export interface Employee {
   outreach_target_per_week: number;
   outreach_target_per_month?: number | null;
   is_active: boolean;
+  approval_status?: ApprovalStatus;
+  uploaded_batch_id?: string;
   team_id?: number;
   business_area_id?: number;
   site_id?: number;
   team_name?: string;
   business_area_name?: string;
   site_name?: string;
+  site_languages?: EmployeeSiteLanguage[];
   created_at: string;
 }
 
@@ -88,6 +107,7 @@ export interface OutreachRecord {
   employee_name?: string;
   team_name?: string;
   business_area_name?: string;
+  selected_attachment_ids?: string;
 }
 
 export interface Negation {
@@ -119,6 +139,18 @@ export interface FilterOptions {
   group_domiciles: string[];
 }
 
+export interface TemplateAttachment {
+  id: number;
+  template_id: number;
+  original_filename: string;
+  display_name: string;
+  content_type: string;
+  file_size_bytes: number;
+  is_active: boolean;
+  created_at: string;
+  updated_at?: string;
+}
+
 export interface EmailTemplate {
   id: number;
   name: string;
@@ -129,8 +161,11 @@ export interface EmailTemplate {
   body_template: string;
   version: string;
   is_active: boolean;
+  is_personal?: boolean;
+  created_by_id?: number;
   published_at?: string;
   created_at: string;
+  attachments?: TemplateAttachment[];
 }
 
 export interface HotTopic {
@@ -140,6 +175,9 @@ export interface HotTopic {
   topic_text: string;
   language: Language;
   is_active: boolean;
+  published_at?: string;
+  updated_at?: string;
+  created_by_id?: number;
   created_at: string;
 }
 

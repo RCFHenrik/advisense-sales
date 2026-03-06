@@ -64,6 +64,12 @@ class LanguageEnum(str, enum.Enum):
     FINNISH = "fi"
 
 
+class ApprovalStatusEnum(str, enum.Enum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+
+
 # ── Organisational tables ──────────────────────────────────────────────
 
 class BusinessArea(Base):
@@ -88,6 +94,36 @@ class Site(Base):
 
     employees = relationship("Employee", back_populates="site")
     bank_holidays = relationship("BankHoliday", back_populates="site")
+
+
+# ── Site Language (admin-configurable language options) ────────────────
+
+class SiteLanguage(Base):
+    __tablename__ = "site_languages"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(100), nullable=False, unique=True)  # e.g. "Swedish", "English"
+    code = Column(String(10), nullable=True)  # e.g. "sv", "en" (optional shorthand)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=utcnow)
+
+    employee_links = relationship("EmployeeSiteLanguage", back_populates="site_language")
+
+
+class EmployeeSiteLanguage(Base):
+    __tablename__ = "employee_site_languages"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    employee_id = Column(Integer, ForeignKey("employees.id"), nullable=False)
+    site_language_id = Column(Integer, ForeignKey("site_languages.id"), nullable=False)
+    created_at = Column(DateTime, default=utcnow)
+
+    employee = relationship("Employee", back_populates="site_languages")
+    site_language = relationship("SiteLanguage", back_populates="employee_links")
+
+    __table_args__ = (
+        UniqueConstraint("employee_id", "site_language_id"),
+    )
 
 
 class Team(Base):
@@ -123,6 +159,8 @@ class Employee(Base):
     outreach_target_per_week = Column(Integer, default=3)
     outreach_target_per_month = Column(Integer, nullable=True, default=None)
     is_active = Column(Boolean, default=True)
+    approval_status = Column(String(20), nullable=False, default="approved")
+    uploaded_batch_id = Column(String(100), nullable=True)
     password_hash = Column(String(300), nullable=True)  # For mock auth
     profile_description = Column(Text, nullable=True)
     created_at = Column(DateTime, default=utcnow)
@@ -131,6 +169,7 @@ class Employee(Base):
     team = relationship("Team", back_populates="employees")
     business_area = relationship("BusinessArea", back_populates="employees")
     site = relationship("Site", back_populates="employees")
+    site_languages = relationship("EmployeeSiteLanguage", back_populates="employee", lazy="selectin")
     outreach_records = relationship("OutreachRecord", back_populates="employee", foreign_keys="OutreachRecord.employee_id")
     negations = relationship("Negation", back_populates="employee")
 
@@ -227,6 +266,7 @@ class OutreachRecord(Base):
     email_language = Column(Enum(LanguageEnum), nullable=True)
     template_id = Column(Integer, ForeignKey("email_templates.id"), nullable=True)
     template_version = Column(String(50), nullable=True)
+    selected_attachment_ids = Column(Text, nullable=True)  # JSON array of TemplateAttachment IDs
 
     # Meeting slots
     proposed_slot_1_start = Column(DateTime, nullable=True)
@@ -310,8 +350,35 @@ class EmailTemplate(Base):
     is_active = Column(Boolean, default=True)
     published_at = Column(DateTime, nullable=True)
     created_by_id = Column(Integer, ForeignKey("employees.id"), nullable=True)
+    is_personal = Column(Boolean, default=False)
     created_at = Column(DateTime, default=utcnow)
     updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
+
+    attachments = relationship("TemplateAttachment", back_populates="template", lazy="selectin")
+
+
+# ── Template Attachment ──────────────────────────────────────────────
+
+class TemplateAttachment(Base):
+    __tablename__ = "template_attachments"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    template_id = Column(Integer, ForeignKey("email_templates.id"), nullable=False)
+    original_filename = Column(String(500), nullable=False)
+    display_name = Column(String(500), nullable=False)
+    stored_filename = Column(String(200), nullable=False)
+    content_type = Column(String(100), nullable=False)
+    file_size_bytes = Column(Integer, nullable=False)
+    uploaded_by_id = Column(Integer, ForeignKey("employees.id"), nullable=True)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=utcnow)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
+
+    template = relationship("EmailTemplate", back_populates="attachments")
+
+    __table_args__ = (
+        Index("ix_template_attachments_template", "template_id"),
+    )
 
 
 # ── Hot Topic ─────────────────────────────────────────────────────────
@@ -325,7 +392,10 @@ class HotTopic(Base):
     topic_text = Column(Text, nullable=False)
     language = Column(Enum(LanguageEnum), nullable=False, default=LanguageEnum.ENGLISH)
     is_active = Column(Boolean, default=True)
+    published_at = Column(DateTime, nullable=True)
+    created_by_id = Column(Integer, ForeignKey("employees.id"), nullable=True)
     created_at = Column(DateTime, default=utcnow)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
 
     business_area = relationship("BusinessArea", back_populates="hot_topics")
 

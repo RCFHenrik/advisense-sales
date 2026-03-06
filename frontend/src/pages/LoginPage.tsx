@@ -23,8 +23,8 @@ export default function LoginPage() {
   return (
     <div className="login-page">
       <form className="login-card" onSubmit={handleSubmit}>
-        <h1>ADVISENSE</h1>
-        <p className="subtitle">Sales Coordination Platform</p>
+        <img src="/advisense_white.png" alt="Advisense" style={{ width: '80%', maxWidth: 280, marginBottom: 12, alignSelf: 'center' }} />
+        <p className="subtitle">Sales Orchestration Platform</p>
 
         {error && <div className="login-error">{error}</div>}
 

@@ -4,7 +4,7 @@ from pydantic import BaseModel, EmailStr
 
 from app.models.models import (
     RoleEnum, OutreachStatusEnum, NegationReasonEnum,
-    ContactStatusEnum, LanguageEnum,
+    ContactStatusEnum, LanguageEnum, ApprovalStatusEnum,
 )
 
 
@@ -33,6 +33,7 @@ class EmployeeBase(BaseModel):
     outreach_target_per_week: int = 3
     outreach_target_per_month: Optional[int] = None
     is_active: bool = True
+    approval_status: ApprovalStatusEnum = ApprovalStatusEnum.APPROVED
     profile_description: Optional[str] = None
 
 
@@ -71,6 +72,21 @@ class EmployeeTargetUpdate(BaseModel):
     outreach_target_per_month: Optional[int] = None
 
 
+class EmployeeApprovalRequest(BaseModel):
+    approval_status: ApprovalStatusEnum
+
+
+class EmployeeRoleUpdate(BaseModel):
+    role: RoleEnum
+
+
+class ConsultantUploadSummary(BaseModel):
+    added: int
+    skipped_duplicate: int
+    warnings: List[str]
+    total_rows: int
+
+
 class EmployeeOut(EmployeeBase):
     id: int
     team_id: Optional[int] = None
@@ -79,6 +95,8 @@ class EmployeeOut(EmployeeBase):
     team_name: Optional[str] = None
     business_area_name: Optional[str] = None
     site_name: Optional[str] = None
+    uploaded_batch_id: Optional[str] = None
+    site_languages: List["EmployeeSiteLanguageOut"] = []
     created_at: datetime
 
     class Config:
@@ -128,6 +146,30 @@ class SiteOut(BaseModel):
 class SiteCreate(BaseModel):
     name: str
     country_code: str
+
+
+# ── Site Language ─────────────────────────────────────────────────────
+
+class SiteLanguageOut(BaseModel):
+    id: int
+    name: str
+    code: Optional[str] = None
+    is_active: bool
+
+    class Config:
+        from_attributes = True
+
+
+class SiteLanguageCreate(BaseModel):
+    name: str
+    code: Optional[str] = None
+
+
+class EmployeeSiteLanguageOut(BaseModel):
+    id: int
+    site_language_id: int
+    name: str
+    code: Optional[str] = None
 
 
 # ── Contact ───────────────────────────────────────────────────────────
@@ -191,6 +233,7 @@ class OutreachRecordOut(BaseModel):
     cooldown_override: bool = False
     recommendation_score: Optional[float] = None
     recommendation_reason: Optional[str] = None
+    selected_attachment_ids: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 
@@ -219,12 +262,14 @@ class OutreachDraftRequest(BaseModel):
     proposed_slot_1_end: Optional[datetime] = None
     proposed_slot_2_start: Optional[datetime] = None
     proposed_slot_2_end: Optional[datetime] = None
+    selected_attachment_ids: Optional[str] = None
 
 
 class OutreachSendRequest(BaseModel):
     email_subject: str
     email_body: str
     email_language: LanguageEnum
+    selected_attachment_ids: Optional[str] = None
 
 
 class OutreachOutcomeRequest(BaseModel):
@@ -257,6 +302,25 @@ class NegationOut(BaseModel):
 
 # ── Email Template ────────────────────────────────────────────────────
 
+class TemplateAttachmentOut(BaseModel):
+    id: int
+    template_id: int
+    original_filename: str
+    display_name: str
+    content_type: str
+    file_size_bytes: int
+    is_active: bool
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class TemplateAttachmentRename(BaseModel):
+    display_name: str
+
+
 class EmailTemplateOut(BaseModel):
     id: int
     name: str
@@ -267,8 +331,11 @@ class EmailTemplateOut(BaseModel):
     body_template: str
     version: str
     is_active: bool
+    is_personal: bool = False
     published_at: Optional[datetime] = None
+    created_by_id: Optional[int] = None
     created_at: datetime
+    attachments: List["TemplateAttachmentOut"] = []
 
     class Config:
         from_attributes = True
@@ -281,6 +348,7 @@ class EmailTemplateCreate(BaseModel):
     language: LanguageEnum
     subject_template: str = ""
     body_template: str = ""
+    is_personal: bool = False
 
 
 class EmailTemplateUpdate(BaseModel):
@@ -302,7 +370,10 @@ class HotTopicOut(BaseModel):
     topic_text: str
     language: LanguageEnum
     is_active: bool
+    published_at: Optional[datetime] = None
+    created_by_id: Optional[int] = None
     created_at: datetime
+    updated_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True
@@ -313,6 +384,14 @@ class HotTopicCreate(BaseModel):
     responsibility_domain: str
     topic_text: str
     language: LanguageEnum = LanguageEnum.ENGLISH
+
+
+class HotTopicUpdate(BaseModel):
+    business_area_id: Optional[int] = None
+    responsibility_domain: Optional[str] = None
+    topic_text: Optional[str] = None
+    language: Optional[LanguageEnum] = None
+    is_active: Optional[bool] = None
 
 
 # ── Column Mapping ────────────────────────────────────────────────────

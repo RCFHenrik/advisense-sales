@@ -8,9 +8,10 @@ from sqlalchemy.orm import Session
 
 from app.models.models import (
     Contact, Meeting, ColumnMapping, ContactStatusEnum, JobTitleDomain,
-    ClassificationLookup,
+    ClassificationLookup, Employee, BusinessArea, Team, Site,
+    LanguageEnum, RoleEnum, ApprovalStatusEnum, SiteLanguage, EmployeeSiteLanguage,
 )
-from app.schemas.schemas import UploadDiffSummary
+from app.schemas.schemas import UploadDiffSummary, ConsultantUploadSummary
 
 
 class ExcelImportService:
@@ -536,6 +537,166 @@ class ExcelImportService:
             unchanged=0,
             total_rows=len(data),
             errors=[],
+        )
+
+    # ── Consultant batch import ─────────────────────────────────────────
+
+    def _get_col(self, row: Dict, variants: List[str]) -> Optional[str]:
+        """Try multiple column name variants and return the first non-empty match."""
+        for v in variants:
+            val = row.get(v)
+            if val is not None:
+                s = str(val).strip()
+                if s and s.lower() not in ("", "#n/a", "n/a", "nan", "none"):
+                    return s
+        return None
+
+    def import_consultants(
+        self, content: bytes, batch_id: str, uploaded_by_id: int, filename: str = ""
+    ) -> ConsultantUploadSummary:
+        """Import consultants from CSV/Excel. All fields optional. Creates as PENDING."""
+        headers, data = self._read_file(content, filename)
+
+        # Build lookup maps (case-insensitive)
+        ba_map = {ba.name.lower(): ba.id for ba in self.db.query(BusinessArea).all()}
+        team_map: Dict[str, Tuple[int, int]] = {}
+        for t in self.db.query(Team).all():
+            team_map[t.name.lower()] = (t.id, t.business_area_id)
+        site_map = {s.name.lower(): s.id for s in self.db.query(Site).all()}
+        existing_emails = {
+            e.email.lower() for e in self.db.query(Employee.email).all()
+        }
+
+        # Build site language lookup: name/code (case-insensitive) → SiteLanguage.id
+        sl_by_name: Dict[str, int] = {}
+        for sl in self.db.query(SiteLanguage).filter(SiteLanguage.is_active == True).all():
+            sl_by_name[sl.name.lower()] = sl.id
+            if sl.code:
+                sl_by_name[sl.code.lower()] = sl.id
+
+        lang_map: Dict[str, LanguageEnum] = {
+            "sv": LanguageEnum.SWEDISH, "swedish": LanguageEnum.SWEDISH, "svenska": LanguageEnum.SWEDISH,
+            "no": LanguageEnum.NORWEGIAN, "norwegian": LanguageEnum.NORWEGIAN, "norsk": LanguageEnum.NORWEGIAN,
+            "da": LanguageEnum.DANISH, "danish": LanguageEnum.DANISH, "dansk": LanguageEnum.DANISH,
+            "en": LanguageEnum.ENGLISH, "english": LanguageEnum.ENGLISH, "engelska": LanguageEnum.ENGLISH,
+            "de": LanguageEnum.GERMAN, "german": LanguageEnum.GERMAN, "tyska": LanguageEnum.GERMAN,
+            "fi": LanguageEnum.FINNISH, "finnish": LanguageEnum.FINNISH, "finska": LanguageEnum.FINNISH,
+        }
+
+        added = 0
+        skipped = 0
+        warnings: List[str] = []
+        # Track employee + site_language pairs to create after commit
+        pending_site_langs: List[Tuple] = []  # (Employee ref, List[site_language_id])
+
+        for i, row in enumerate(data, start=2):  # start=2 for row numbering (row 1 is header)
+            name = self._get_col(row, ["Name", "name", "FullName", "Full Name", "Namn"])
+            email = self._get_col(row, ["Email", "email", "E-mail", "E-post", "Epost"])
+            seniority = self._get_col(row, ["Seniority", "seniority", "Senioritet"])
+            ba_name = self._get_col(row, ["Business Area", "BusinessArea", "BA", "Affärsområde"])
+            team_name = self._get_col(row, ["Team", "team"])
+            site_name = self._get_col(row, ["Site", "site", "Office", "Kontor"])
+            lang_raw = self._get_col(row, ["Language", "language", "Lang", "Språk"])
+            site_lang_raw = self._get_col(row, [
+                "SiteLanguage", "Site Language", "SiteLanguages", "Site Languages",
+                "Språk (site)", "SiteSpråk",
+            ])
+
+            # Skip fully empty rows
+            if not name and not email:
+                continue
+
+            # Skip duplicate emails
+            if email and email.lower() in existing_emails:
+                skipped += 1
+                warnings.append(f"Row {i}: Email '{email}' already exists, skipped")
+                continue
+
+            # Resolve Business Area
+            ba_id = None
+            if ba_name:
+                ba_id = ba_map.get(ba_name.lower())
+                if not ba_id:
+                    warnings.append(f"Row {i}: Business Area '{ba_name}' not found")
+
+            # Resolve Team
+            team_id = None
+            if team_name:
+                team_entry = team_map.get(team_name.lower())
+                if team_entry:
+                    team_id = team_entry[0]
+                else:
+                    warnings.append(f"Row {i}: Team '{team_name}' not found")
+
+            # Resolve Site
+            site_id = None
+            if site_name:
+                site_id = site_map.get(site_name.lower())
+                if not site_id:
+                    warnings.append(f"Row {i}: Site '{site_name}' not found")
+
+            # Resolve Language
+            language = LanguageEnum.ENGLISH
+            if lang_raw:
+                language = lang_map.get(lang_raw.lower(), LanguageEnum.ENGLISH)
+
+            # Resolve SiteLanguage(s) — may be comma or semicolon separated
+            resolved_sl_ids: List[int] = []
+            if site_lang_raw:
+                # Split by comma or semicolon
+                parts = [p.strip() for p in site_lang_raw.replace(";", ",").split(",") if p.strip()]
+                for part in parts:
+                    sl_id = sl_by_name.get(part.lower())
+                    if sl_id:
+                        if sl_id not in resolved_sl_ids:
+                            resolved_sl_ids.append(sl_id)
+                    else:
+                        # Auto-create the site language if it doesn't exist
+                        new_sl = SiteLanguage(name=part, is_active=True)
+                        self.db.add(new_sl)
+                        self.db.flush()  # get the ID
+                        sl_by_name[part.lower()] = new_sl.id
+                        resolved_sl_ids.append(new_sl.id)
+                        warnings.append(f"Row {i}: SiteLanguage '{part}' auto-created")
+
+            # Build placeholder email if missing
+            emp_email = email or f"pending-{batch_id}-{i}@placeholder.local"
+
+            emp = Employee(
+                name=name or "(No name)",
+                email=emp_email,
+                role=RoleEnum.CONSULTANT,
+                seniority=seniority,
+                business_area_id=ba_id,
+                team_id=team_id,
+                site_id=site_id,
+                primary_language=language,
+                is_active=False,
+                approval_status=ApprovalStatusEnum.PENDING,
+                uploaded_batch_id=batch_id,
+            )
+            self.db.add(emp)
+            added += 1
+            if email:
+                existing_emails.add(email.lower())
+
+            if resolved_sl_ids:
+                pending_site_langs.append((emp, resolved_sl_ids))
+
+        # Flush to get employee IDs, then create site language links
+        self.db.flush()
+        for emp, sl_ids in pending_site_langs:
+            for sl_id in sl_ids:
+                esl = EmployeeSiteLanguage(employee_id=emp.id, site_language_id=sl_id)
+                self.db.add(esl)
+
+        self.db.commit()
+
+        return ConsultantUploadSummary(
+            added=added,
+            skipped_duplicate=skipped,
+            warnings=warnings,
+            total_rows=len(data),
         )
 
     def _default_contact_mappings(self) -> Dict[str, str]:

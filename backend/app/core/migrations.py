@@ -158,3 +158,102 @@ def run_migrations():
                 "ON classification_lookups(job_title, client_group_domicile, client_tier, client_industry)"
             ))
             conn.commit()
+
+        # ── HotTopic: add published_at, updated_at, created_by_id columns ──
+        ht_cols = [r[1] for r in conn.execute(text("PRAGMA table_info(hot_topics)")).fetchall()]
+        if "published_at" not in ht_cols:
+            conn.execute(text("ALTER TABLE hot_topics ADD COLUMN published_at DATETIME"))
+            conn.commit()
+        if "updated_at" not in ht_cols:
+            conn.execute(text("ALTER TABLE hot_topics ADD COLUMN updated_at DATETIME"))
+            conn.commit()
+        if "created_by_id" not in ht_cols:
+            conn.execute(text(
+                "ALTER TABLE hot_topics ADD COLUMN created_by_id INTEGER REFERENCES employees(id)"
+            ))
+            conn.commit()
+
+        # ── EmailTemplate: add is_personal column ────────────────────────────
+        et_cols3 = [r[1] for r in conn.execute(text("PRAGMA table_info(email_templates)")).fetchall()]
+        if "is_personal" not in et_cols3:
+            conn.execute(text(
+                "ALTER TABLE email_templates ADD COLUMN is_personal BOOLEAN DEFAULT 0"
+            ))
+            conn.commit()
+
+        # ── TemplateAttachment table ─────────────────────────────────────────
+        tables2 = [r[0] for r in conn.execute(text(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )).fetchall()]
+
+        if "template_attachments" not in tables2:
+            conn.execute(text("""
+                CREATE TABLE template_attachments (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    template_id INTEGER NOT NULL REFERENCES email_templates(id),
+                    original_filename VARCHAR(500) NOT NULL,
+                    display_name VARCHAR(500) NOT NULL,
+                    stored_filename VARCHAR(200) NOT NULL,
+                    content_type VARCHAR(100) NOT NULL,
+                    file_size_bytes INTEGER NOT NULL,
+                    uploaded_by_id INTEGER REFERENCES employees(id),
+                    is_active BOOLEAN DEFAULT 1,
+                    created_at DATETIME,
+                    updated_at DATETIME
+                )
+            """))
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_template_attachments_template "
+                "ON template_attachments(template_id)"
+            ))
+            conn.commit()
+
+        # ── OutreachRecord: add selected_attachment_ids column ───────────────
+        or_cols = [r[1] for r in conn.execute(text("PRAGMA table_info(outreach_records)")).fetchall()]
+        if "selected_attachment_ids" not in or_cols:
+            conn.execute(text(
+                "ALTER TABLE outreach_records ADD COLUMN selected_attachment_ids TEXT"
+            ))
+            conn.commit()
+
+        # ── Employee: add approval_status and uploaded_batch_id columns ───
+        emp_cols3 = [r[1] for r in conn.execute(text("PRAGMA table_info(employees)")).fetchall()]
+        if "approval_status" not in emp_cols3:
+            conn.execute(text(
+                "ALTER TABLE employees ADD COLUMN approval_status VARCHAR(20) DEFAULT 'approved' NOT NULL"
+            ))
+            conn.commit()
+        if "uploaded_batch_id" not in emp_cols3:
+            conn.execute(text(
+                "ALTER TABLE employees ADD COLUMN uploaded_batch_id VARCHAR(100)"
+            ))
+            conn.commit()
+
+        # ── SiteLanguage + EmployeeSiteLanguage tables ───────────────────────
+        tables3 = [r[0] for r in conn.execute(text(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )).fetchall()]
+
+        if "site_languages" not in tables3:
+            conn.execute(text("""
+                CREATE TABLE site_languages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name VARCHAR(100) NOT NULL UNIQUE,
+                    code VARCHAR(10),
+                    is_active BOOLEAN DEFAULT 1,
+                    created_at DATETIME
+                )
+            """))
+            conn.commit()
+
+        if "employee_site_languages" not in tables3:
+            conn.execute(text("""
+                CREATE TABLE employee_site_languages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    employee_id INTEGER NOT NULL REFERENCES employees(id),
+                    site_language_id INTEGER NOT NULL REFERENCES site_languages(id),
+                    created_at DATETIME,
+                    UNIQUE(employee_id, site_language_id)
+                )
+            """))
+            conn.commit()

@@ -107,6 +107,7 @@ def _outreach_to_out(o: OutreachRecord) -> OutreachRecordOut:
         cooldown_override=o.cooldown_override,
         recommendation_score=o.recommendation_score,
         recommendation_reason=o.recommendation_reason,
+        selected_attachment_ids=o.selected_attachment_ids,
         created_at=o.created_at,
         updated_at=o.updated_at,
         contact_name=o.contact.full_name if o.contact else None,

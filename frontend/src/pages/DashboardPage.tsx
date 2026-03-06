@@ -250,8 +250,8 @@ export default function DashboardPage() {
                 <thead>
                   <tr>
                     <SortableTh label="Consultant" sortKey="employee_name" sort={ovSort} onSort={handleOvSort} />
-                    <SortableTh label="Team" sortKey="team_name" sort={ovSort} onSort={handleOvSort} />
                     <SortableTh label="Business Area" sortKey="business_area_name" sort={ovSort} onSort={handleOvSort} />
+                    <SortableTh label="Team" sortKey="team_name" sort={ovSort} onSort={handleOvSort} />
                     <SortableTh label="Proposed" sortKey="proposed" sort={ovSort} onSort={handleOvSort} style={{ textAlign: 'right' }} />
                     <SortableTh label="Accepted" sortKey="accepted" sort={ovSort} onSort={handleOvSort} style={{ textAlign: 'right' }} />
                     <SortableTh label="Sent" sortKey="sent" sort={ovSort} onSort={handleOvSort} style={{ textAlign: 'right' }} />
@@ -276,8 +276,8 @@ export default function DashboardPage() {
                             {r.employee_name}
                           </button>
                         </td>
-                        <td style={{ fontSize: 13 }}>{r.team_name || '—'}</td>
                         <td style={{ fontSize: 13 }}>{r.business_area_name || '—'}</td>
+                        <td style={{ fontSize: 13 }}>{r.team_name || '—'}</td>
                         <td style={{ textAlign: 'right' }}>
                           {r.proposed > 0 ? <span className="badge badge-proposed">{r.proposed}</span> : <span style={{ color: '#a0aec0' }}>—</span>}
                         </td>
@@ -345,19 +345,19 @@ export default function DashboardPage() {
             </select>
             <select
               className="form-control"
-              value={detTeam}
-              onChange={e => { setDetTeam(e.target.value === '' ? '' : Number(e.target.value)); setDetPage(1); }}
-            >
-              <option value="">All Teams</option>
-              {teamOptions.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
-            </select>
-            <select
-              className="form-control"
               value={detBA}
               onChange={e => { setDetBA(e.target.value === '' ? '' : Number(e.target.value)); setDetPage(1); }}
             >
               <option value="">All Business Areas</option>
               {baOptions.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
+            </select>
+            <select
+              className="form-control"
+              value={detTeam}
+              onChange={e => { setDetTeam(e.target.value === '' ? '' : Number(e.target.value)); setDetPage(1); }}
+            >
+              <option value="">All Teams</option>
+              {teamOptions.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
             </select>
           </div>
 
@@ -369,8 +369,8 @@ export default function DashboardPage() {
                 <thead>
                   <tr>
                     <SortableTh label="Consultant" sortKey="employee_name" sort={detSort} onSort={handleDetSort} />
-                    <SortableTh label="Team" sortKey="team_name" sort={detSort} onSort={handleDetSort} />
                     <SortableTh label="Business Area" sortKey="business_area_name" sort={detSort} onSort={handleDetSort} />
+                    <SortableTh label="Team" sortKey="team_name" sort={detSort} onSort={handleDetSort} />
                     <SortableTh label="Contact" sortKey="contact_name" sort={detSort} onSort={handleDetSort} />
                     <SortableTh label="Company" sortKey="contact_company" sort={detSort} onSort={handleDetSort} />
                     <SortableTh label="Status" sortKey="status" sort={detSort} onSort={handleDetSort} />
@@ -385,8 +385,8 @@ export default function DashboardPage() {
                     pagedRecords.map(r => (
                       <tr key={r.id} style={{ cursor: 'pointer' }} onClick={() => navigate(`/outreach/${r.id}`)}>
                         <td style={{ fontSize: 13 }}>{r.employee_name || '—'}</td>
-                        <td style={{ fontSize: 13 }}>{r.team_name || '—'}</td>
                         <td style={{ fontSize: 13 }}>{r.business_area_name || '—'}</td>
+                        <td style={{ fontSize: 13 }}>{r.team_name || '—'}</td>
                         <td style={{ fontWeight: 500, fontSize: 13 }}>{r.contact_name || '—'}</td>
                         <td style={{ fontSize: 13 }}>{r.contact_company || '—'}</td>
                         <td>

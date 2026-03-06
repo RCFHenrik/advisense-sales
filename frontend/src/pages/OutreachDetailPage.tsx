@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import api from '../api/client';
-import type { OutreachRecord, NegationReason, Language, EmailTemplate, Contact } from '../types';
+import type { OutreachRecord, NegationReason, Language, EmailTemplate, Contact, TemplateAttachment } from '../types';
 
 const NEGATION_REASONS: { value: NegationReason; label: string }[] = [
   { value: 'wrong_person', label: 'Wrong person (left company / changed role)' },
@@ -32,6 +32,12 @@ const LANGUAGES: { value: Language; label: string }[] = [
   { value: 'fi', label: 'Finnish' },
 ];
 
+const fmtFileSize = (bytes: number) => {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+};
+
 export default function OutreachDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -54,6 +60,10 @@ export default function OutreachDetailPage() {
     { employee_name: string; meeting_count: number }[]
   >([]);
 
+  // Attachment state
+  const [templateAttachments, setTemplateAttachments] = useState<TemplateAttachment[]>([]);
+  const [selectedAttachmentIds, setSelectedAttachmentIds] = useState<number[]>([]);
+
   useEffect(() => {
     fetchRecord();
   }, [id]);
@@ -71,11 +81,22 @@ export default function OutreachDetailPage() {
 
   // Fetch available templates whenever the selected language changes
   useEffect(() => {
-    setSelectedTemplateId(null); // reset selection on language change
-    api.get('/templates/', { params: { language: emailLang, active_only: true } })
+    setSelectedTemplateId(null);
+    api.get('/templates/', { params: { language: emailLang, active_only: true, include_personal: true } })
       .then((r) => setAvailableTemplates(r.data))
       .catch(() => setAvailableTemplates([]));
   }, [emailLang]);
+
+  // Fetch attachments when a template is selected
+  useEffect(() => {
+    if (!selectedTemplateId) {
+      setTemplateAttachments([]);
+      return;
+    }
+    api.get(`/templates/${selectedTemplateId}/attachments`)
+      .then((r) => setTemplateAttachments(r.data))
+      .catch(() => setTemplateAttachments([]));
+  }, [selectedTemplateId]);
 
   const fetchRecord = async () => {
     try {
@@ -84,6 +105,13 @@ export default function OutreachDetailPage() {
       setEmailSubject(res.data.email_subject || '');
       setEmailBody(res.data.email_body || '');
       setEmailLang(res.data.email_language || 'en');
+      // Restore selected attachment IDs from saved record
+      if (res.data.selected_attachment_ids) {
+        try {
+          const ids = JSON.parse(res.data.selected_attachment_ids);
+          if (Array.isArray(ids)) setSelectedAttachmentIds(ids);
+        } catch { }
+      }
     } catch {
       navigate('/outreach');
     }
@@ -109,7 +137,6 @@ export default function OutreachDetailPage() {
       });
       setEmailSubject(res.data.subject);
       setEmailBody(res.data.body);
-      // Update dropdown to reflect which template was actually used
       if (res.data.template_id) {
         setSelectedTemplateId(res.data.template_id);
       }
@@ -120,11 +147,17 @@ export default function OutreachDetailPage() {
     }
   };
 
+  const buildAttachmentPayload = () => {
+    if (selectedAttachmentIds.length === 0) return undefined;
+    return JSON.stringify(selectedAttachmentIds);
+  };
+
   const handleSaveDraft = async () => {
     await api.post(`/outreach/${id}/draft`, {
       email_subject: emailSubject,
       email_body: emailBody,
       email_language: emailLang,
+      selected_attachment_ids: buildAttachmentPayload(),
     });
     fetchRecord();
   };
@@ -134,6 +167,7 @@ export default function OutreachDetailPage() {
       email_subject: emailSubject,
       email_body: emailBody,
       email_language: emailLang,
+      selected_attachment_ids: buildAttachmentPayload(),
     });
     fetchRecord();
   };
@@ -157,6 +191,19 @@ export default function OutreachDetailPage() {
     setShowOutcome(false);
     fetchRecord();
   };
+
+  const toggleAttachment = (attId: number) => {
+    setSelectedAttachmentIds((prev) =>
+      prev.includes(attId) ? prev.filter((x) => x !== attId) : [...prev, attId]
+    );
+  };
+
+  // Split templates into official vs personal for optgroups
+  const officialTemplates = availableTemplates.filter((t) => !t.is_personal);
+  const myTemplates = availableTemplates.filter((t) => t.is_personal);
+
+  // For the prepared view, resolve selected attachment details
+  const resolvedAttachments = templateAttachments.filter((a) => selectedAttachmentIds.includes(a.id));
 
   if (!record) return <div className="empty-state">Loading...</div>;
 
@@ -267,15 +314,26 @@ export default function OutreachDetailPage() {
               </select>
               <select
                 className="form-control"
-                style={{ width: 200 }}
+                style={{ width: 220 }}
                 value={selectedTemplateId ?? ''}
                 onChange={(e) => setSelectedTemplateId(e.target.value ? Number(e.target.value) : null)}
                 title="Select template (Auto picks the best match for this contact)"
               >
                 <option value="">Auto (recommended)</option>
-                {availableTemplates.map((t) => (
-                  <option key={t.id} value={t.id}>{t.name}</option>
-                ))}
+                {officialTemplates.length > 0 && (
+                  <optgroup label="Official Templates">
+                    {officialTemplates.map((t) => (
+                      <option key={t.id} value={t.id}>{t.name}</option>
+                    ))}
+                  </optgroup>
+                )}
+                {myTemplates.length > 0 && (
+                  <optgroup label="My Templates">
+                    {myTemplates.map((t) => (
+                      <option key={t.id} value={t.id}>{t.name}</option>
+                    ))}
+                  </optgroup>
+                )}
               </select>
               <button className="btn btn-sm btn-outline" onClick={handleGenerateEmail} disabled={generating}>
                 {generating ? 'Generating...' : 'Auto-generate'}
@@ -300,6 +358,39 @@ export default function OutreachDetailPage() {
                 rows={12}
               />
             </div>
+
+            {/* Attachment selection panel */}
+            {templateAttachments.length > 0 && (
+              <div style={{ marginBottom: 16, padding: 12, background: '#f7fafc', borderRadius: 8 }}>
+                <label style={{ fontWeight: 600, marginBottom: 8, display: 'block', fontSize: 13 }}>
+                  Attachments to include
+                </label>
+                {templateAttachments.map((att) => (
+                  <div key={att.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0' }}>
+                    <input
+                      type="checkbox"
+                      checked={selectedAttachmentIds.includes(att.id)}
+                      onChange={() => toggleAttachment(att.id)}
+                      id={`att-${att.id}`}
+                    />
+                    <label htmlFor={`att-${att.id}`} style={{ cursor: 'pointer', fontSize: 13, flex: 1 }}>
+                      {att.display_name}
+                      <span style={{ color: '#a0aec0', marginLeft: 8 }}>
+                        ({att.content_type.includes('pdf') ? 'PDF' : 'PPT'}, {fmtFileSize(att.file_size_bytes)})
+                      </span>
+                    </label>
+                    <a
+                      href={`${api.defaults.baseURL}/templates/${selectedTemplateId}/attachments/${att.id}/download`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      style={{ fontSize: 12, color: 'var(--primary, #3182ce)' }}
+                    >
+                      Preview
+                    </a>
+                  </div>
+                ))}
+              </div>
+            )}
 
             {record.proposed_slot_1_start && (
               <div style={{ marginBottom: 16, fontSize: 13, color: '#718096' }}>
@@ -331,6 +422,30 @@ export default function OutreachDetailPage() {
               <div style={{ fontWeight: 600, marginBottom: 8 }}>Subject: {record.email_subject}</div>
               <pre style={{ whiteSpace: 'pre-wrap', fontSize: 13 }}>{record.email_body}</pre>
             </div>
+
+            {/* Show selected attachments in prepared view */}
+            {selectedAttachmentIds.length > 0 && (
+              <div style={{ marginBottom: 16, padding: 12, background: '#ebf8ff', borderRadius: 8 }}>
+                <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 6 }}>
+                  Attachments to include with this email:
+                </div>
+                {resolvedAttachments.length > 0
+                  ? resolvedAttachments.map((att) => (
+                      <div key={att.id} style={{ fontSize: 13, padding: '2px 0' }}>
+                        {att.display_name}
+                        <span style={{ color: '#a0aec0', marginLeft: 8 }}>
+                          ({att.content_type.includes('pdf') ? 'PDF' : 'PPT'}, {fmtFileSize(att.file_size_bytes)})
+                        </span>
+                      </div>
+                    ))
+                  : (
+                    <div style={{ fontSize: 13, color: '#718096' }}>
+                      {selectedAttachmentIds.length} attachment(s) selected
+                    </div>
+                  )}
+              </div>
+            )}
+
             <div style={{ display: 'flex', gap: 8 }}>
               <button className="btn btn-outline" onClick={handleRevertToDraft}>← Back to Draft</button>
               <button className="btn btn-primary" onClick={handleMarkSent}>Mark as Sent</button>

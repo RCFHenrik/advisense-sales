@@ -8,13 +8,13 @@ from app.core.auth import require_role
 from app.models.models import (
     Employee, RoleEnum, BusinessArea, Team, Site, SystemConfig,
     ColumnMapping, AuditLog, SuppressionEntry, Contact, ContactStatusEnum,
-    BankHoliday,
+    BankHoliday, SiteLanguage,
 )
 from app.schemas.schemas import (
     BusinessAreaOut, BusinessAreaCreate, TeamOut, TeamCreate,
     SiteOut, SiteCreate, SystemConfigOut, SystemConfigUpdate,
     ColumnMappingOut, ColumnMappingCreate, ColumnMappingUpdate,
-    AuditLogOut,
+    AuditLogOut, SiteLanguageOut, SiteLanguageCreate,
 )
 
 router = APIRouter()
@@ -25,7 +25,7 @@ router = APIRouter()
 @router.get("/business-areas", response_model=List[BusinessAreaOut])
 def list_business_areas(
     db: Session = Depends(get_db),
-    current_user: Employee = Depends(require_role(RoleEnum.ADMIN, RoleEnum.BA_MANAGER)),
+    current_user: Employee = Depends(require_role(RoleEnum.ADMIN, RoleEnum.BA_MANAGER, RoleEnum.TEAM_MANAGER)),
 ):
     return [BusinessAreaOut.model_validate(ba) for ba in db.query(BusinessArea).order_by(BusinessArea.name).all()]
 
@@ -96,7 +96,7 @@ def create_team(
 @router.get("/sites", response_model=List[SiteOut])
 def list_sites(
     db: Session = Depends(get_db),
-    current_user: Employee = Depends(require_role(RoleEnum.ADMIN, RoleEnum.BA_MANAGER)),
+    current_user: Employee = Depends(require_role(RoleEnum.ADMIN, RoleEnum.BA_MANAGER, RoleEnum.TEAM_MANAGER)),
 ):
     return [SiteOut.model_validate(s) for s in db.query(Site).order_by(Site.name).all()]
 
@@ -112,6 +112,60 @@ def create_site(
     db.commit()
     db.refresh(s)
     return SiteOut.model_validate(s)
+
+
+# ── Site Languages ───────────────────────────────────────────────────
+
+@router.get("/site-languages", response_model=List[SiteLanguageOut])
+def list_site_languages(
+    db: Session = Depends(get_db),
+    current_user: Employee = Depends(require_role(
+        RoleEnum.ADMIN, RoleEnum.BA_MANAGER, RoleEnum.TEAM_MANAGER, RoleEnum.CONSULTANT
+    )),
+):
+    """List all site languages. Available to all roles for dropdown population."""
+    return [
+        SiteLanguageOut.model_validate(sl)
+        for sl in db.query(SiteLanguage).filter(SiteLanguage.is_active == True).order_by(SiteLanguage.name).all()
+    ]
+
+
+@router.post("/site-languages", response_model=SiteLanguageOut)
+def create_site_language(
+    data: SiteLanguageCreate,
+    db: Session = Depends(get_db),
+    current_user: Employee = Depends(require_role(RoleEnum.ADMIN, RoleEnum.BA_MANAGER)),
+):
+    existing = db.query(SiteLanguage).filter(SiteLanguage.name == data.name).first()
+    if existing:
+        if not existing.is_active:
+            existing.is_active = True
+            if data.code:
+                existing.code = data.code
+            db.commit()
+            db.refresh(existing)
+            return SiteLanguageOut.model_validate(existing)
+        raise HTTPException(status_code=400, detail="Language already exists")
+
+    sl = SiteLanguage(name=data.name, code=data.code)
+    db.add(sl)
+    db.commit()
+    db.refresh(sl)
+    return SiteLanguageOut.model_validate(sl)
+
+
+@router.delete("/site-languages/{language_id}")
+def delete_site_language(
+    language_id: int,
+    db: Session = Depends(get_db),
+    current_user: Employee = Depends(require_role(RoleEnum.ADMIN, RoleEnum.BA_MANAGER)),
+):
+    sl = db.query(SiteLanguage).filter(SiteLanguage.id == language_id).first()
+    if not sl:
+        raise HTTPException(status_code=404, detail="Language not found")
+    sl.is_active = False
+    db.commit()
+    return {"status": "deleted"}
 
 
 # ── Column Mappings ───────────────────────────────────────────────────
