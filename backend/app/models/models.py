@@ -147,7 +147,8 @@ class Contact(Base):
     full_name = Column(String(400), nullable=True)
     email = Column(String(300), nullable=True, index=True)
     job_title = Column(String(300), nullable=True)
-    company_name = Column(String(400), nullable=True)
+    company_name = Column(String(400), nullable=True)  # ClientGroup (group-level entity)
+    client_name = Column(String(400), nullable=True)    # ClientName (specific subsidiary)
     associated_company_id = Column(String(100), nullable=True)
     sector = Column(String(200), nullable=True)
     client_tier = Column(String(50), nullable=True)
@@ -199,6 +200,11 @@ class Meeting(Base):
     client_tier = Column(String(50), nullable=True)
     group_domicile = Column(String(100), nullable=True)
     seniority = Column(String(50), nullable=True)
+    business_area = Column(String(200), nullable=True)
+    team = Column(String(200), nullable=True)
+    site = Column(String(200), nullable=True)
+    client_name = Column(String(400), nullable=True)
+    sector = Column(String(200), nullable=True)
     hubspot_import_batch = Column(String(100), nullable=True)
     created_at = Column(DateTime, default=utcnow)
 
@@ -404,3 +410,58 @@ class FileUpload(Base):
     uploaded_at = Column(DateTime, default=utcnow)
     batch_id = Column(String(100), nullable=False)
     is_rolled_back = Column(Boolean, default=False)
+
+
+# ── Job Title → Domain Mapping ──────────────────────────────────────
+
+class JobTitleDomain(Base):
+    __tablename__ = "jobtitle_domains"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    job_title = Column(String(500), nullable=False, index=True)
+    domain = Column(String(300), nullable=True)
+    created_at = Column(DateTime, default=utcnow)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+# ── Classification Lookup ────────────────────────────────────────────
+
+class ClassificationLookup(Base):
+    __tablename__ = "classification_lookups"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    job_title = Column(String(500), nullable=True)
+    client_group_domicile = Column(String(100), nullable=True)
+    client_tier = Column(String(50), nullable=True)
+    client_industry = Column(String(200), nullable=True)
+    num_contacts = Column(Integer, nullable=True)
+    meetings_total = Column(Integer, nullable=True)
+    top_ba_1 = Column(String(200), nullable=True)
+    top_ba_1_count = Column(Integer, nullable=True)
+    top_ba_1_share = Column(Float, nullable=True)
+    top_ba_2 = Column(String(200), nullable=True)
+    top_ba_2_count = Column(Integer, nullable=True)
+    top_ba_2_share = Column(Float, nullable=True)
+    top_team_1 = Column(String(200), nullable=True)
+    top_team_1_count = Column(Integer, nullable=True)
+    top_team_1_share = Column(Float, nullable=True)
+    top_team_2 = Column(String(200), nullable=True)
+    top_team_2_count = Column(Integer, nullable=True)
+    top_team_2_share = Column(Float, nullable=True)
+    top_registrator_1 = Column(String(200), nullable=True)
+    top_registrator_1_count = Column(Integer, nullable=True)
+    top_registrator_1_share = Column(Float, nullable=True)
+    top_registrator_2 = Column(String(200), nullable=True)
+    top_registrator_2_count = Column(Integer, nullable=True)
+    top_registrator_2_share = Column(Float, nullable=True)
+    meetings_jra_sa = Column(Integer, nullable=True)
+    meetings_manager = Column(Integer, nullable=True)
+    meetings_senior_manager = Column(Integer, nullable=True)
+    meetings_director = Column(Integer, nullable=True)
+    meetings_managing_director = Column(Integer, nullable=True)
+    meetings_other = Column(Integer, nullable=True)
+    created_at = Column(DateTime, default=utcnow)
+
+    __table_args__ = (
+        Index("ix_classification_lookup", "job_title", "client_group_domicile", "client_tier", "client_industry"),
+    )

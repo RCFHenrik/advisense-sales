@@ -28,7 +28,7 @@ def list_contacts(
     group_domicile: Optional[str] = None,
     has_historical_revenue: Optional[bool] = None,
     relevant_search: Optional[bool] = None,
-    sort_by: str = Query("priority_score", regex="^(priority_score|last_activity_date|full_name|company_name)$"),
+    sort_by: str = Query("priority_score", regex="^(priority_score|last_activity_date|full_name|company_name|client_name|sector|job_title|days_since_interaction|revenue|client_tier|group_domicile|owner_name)$"),
     sort_desc: bool = True,
     current_user: Employee = Depends(get_current_user),
     db: Session = Depends(get_db),

@@ -62,6 +62,7 @@ class EmployeeSelfUpdate(BaseModel):
     """Fields any employee may update on their own profile."""
     profile_description: Optional[str] = None
     domain_expertise_tags: Optional[str] = None
+    seniority: Optional[str] = None
 
 
 class EmployeeTargetUpdate(BaseModel):
@@ -140,6 +141,7 @@ class ContactOut(BaseModel):
     email: Optional[str] = None
     job_title: Optional[str] = None
     company_name: Optional[str] = None
+    client_name: Optional[str] = None
     sector: Optional[str] = None
     client_tier: Optional[str] = None
     responsibility_domain: Optional[str] = None

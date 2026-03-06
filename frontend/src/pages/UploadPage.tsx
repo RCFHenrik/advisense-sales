@@ -3,9 +3,38 @@ import api from '../api/client';
 import { useAuth } from '../context/AuthContext';
 import type { FileUploadRecord } from '../types';
 
+type UploadTab = 'contacts' | 'meetings' | 'classification' | 'jobtitle_domain';
+
+const TAB_CONFIG: Record<UploadTab, { label: string; endpoint: string; accept: string; description: string }> = {
+  contacts: {
+    label: 'Contacts',
+    endpoint: '/uploads/contacts',
+    accept: '.xlsx,.xls,.csv',
+    description: 'Import contacts from CSV or Excel',
+  },
+  meetings: {
+    label: 'Meetings',
+    endpoint: '/uploads/meetings',
+    accept: '.xlsx,.xls,.csv',
+    description: 'Import meetings from CSV or Excel',
+  },
+  classification: {
+    label: 'Classification',
+    endpoint: '/uploads/classification',
+    accept: '.xlsx,.xls,.csv',
+    description: 'Import classification lookup data (CSV)',
+  },
+  jobtitle_domain: {
+    label: 'JobTitle Domain',
+    endpoint: '/uploads/jobtitle-domain',
+    accept: '.xlsx,.xls',
+    description: 'Import job title to domain mappings (Excel)',
+  },
+};
+
 export default function UploadPage() {
   const { user } = useAuth();
-  const [activeTab, setActiveTab] = useState<'contacts' | 'meetings'>('contacts');
+  const [activeTab, setActiveTab] = useState<UploadTab>('contacts');
   const [uploading, setUploading] = useState(false);
   const [result, setResult] = useState<any>(null);
   const [error, setError] = useState('');
@@ -31,8 +60,8 @@ export default function UploadPage() {
     formData.append('file', file);
 
     try {
-      const endpoint = activeTab === 'contacts' ? '/uploads/contacts' : '/uploads/meetings';
-      const res = await api.post(endpoint, formData, {
+      const cfg = TAB_CONFIG[activeTab];
+      const res = await api.post(cfg.endpoint, formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
       });
       setResult(res.data);
@@ -42,16 +71,27 @@ export default function UploadPage() {
       setError(err.response?.data?.detail || 'Upload failed');
     } finally {
       setUploading(false);
-      // Reset the input so the same file can be re-uploaded if needed
       e.target.value = '';
     }
   };
+
+  const handleResetMappings = async (fileType: string) => {
+    try {
+      await api.post(`/admin/column-mappings/reset?file_type=${fileType}`);
+      setError('');
+      setResult({ _reset: true, file_type: fileType });
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Reset failed');
+    }
+  };
+
+  const cfg = TAB_CONFIG[activeTab];
 
   return (
     <div>
       <div className="page-header">
         <h2>Data Upload</h2>
-        <p>Import contacts and meetings from HubSpot Excel exports</p>
+        <p>Import contacts, meetings, classification, and domain mappings</p>
       </div>
 
       {!canUpload ? (
@@ -69,36 +109,32 @@ export default function UploadPage() {
       ) : (
         <>
           <div className="tabs">
-            <button
-              className={`tab ${activeTab === 'contacts' ? 'active' : ''}`}
-              onClick={() => { setActiveTab('contacts'); setResult(null); setError(''); }}
-            >
-              Contacts Upload
-            </button>
-            <button
-              className={`tab ${activeTab === 'meetings' ? 'active' : ''}`}
-              onClick={() => { setActiveTab('meetings'); setResult(null); setError(''); }}
-            >
-              Meetings Upload
-            </button>
+            {(Object.keys(TAB_CONFIG) as UploadTab[]).map((tab) => (
+              <button
+                key={tab}
+                className={`tab ${activeTab === tab ? 'active' : ''}`}
+                onClick={() => { setActiveTab(tab); setResult(null); setError(''); }}
+              >
+                {TAB_CONFIG[tab].label}
+              </button>
+            ))}
           </div>
 
           <div className="card" style={{ marginBottom: 16 }}>
             <div className="card-body">
-              {/* Invisible full-size input overlaid on the zone — works in all browsers */}
               <div className="upload-zone" style={{ position: 'relative' }}>
                 <div style={{ fontSize: 36, marginBottom: 8 }}>📤</div>
                 <div style={{ fontWeight: 500 }}>
                   {uploading
                     ? 'Uploading and processing...'
-                    : `Click to upload ${activeTab === 'contacts' ? 'Contacts' : 'Meetings'} file`}
+                    : `Click to upload ${cfg.label} file`}
                 </div>
                 <div style={{ fontSize: 13, color: '#718096', marginTop: 4 }}>
-                  Accepts .xlsx and .xls files
+                  {cfg.description}
                 </div>
                 <input
                   type="file"
-                  accept=".xlsx,.xls"
+                  accept={cfg.accept}
                   onChange={handleUpload}
                   disabled={uploading}
                   style={{
@@ -112,15 +148,27 @@ export default function UploadPage() {
                 />
               </div>
 
-              {error && (
-                <div style={{ marginTop: 16, padding: 12, background: '#fff5f5', borderRadius: 6, color: '#c53030' }}>
-                  ⚠️ {error}
+              {(activeTab === 'contacts' || activeTab === 'meetings') && (
+                <div style={{ marginTop: 12, textAlign: 'right' }}>
+                  <button
+                    className="btn btn-sm"
+                    style={{ fontSize: 12, padding: '4px 10px', background: '#e2e8f0', color: '#4a5568', border: 'none', borderRadius: 4, cursor: 'pointer' }}
+                    onClick={() => handleResetMappings(activeTab)}
+                  >
+                    Reset Column Mappings
+                  </button>
                 </div>
               )}
 
-              {result && (
+              {error && (
+                <div style={{ marginTop: 16, padding: 12, background: '#fff5f5', borderRadius: 6, color: '#c53030' }}>
+                  {error}
+                </div>
+              )}
+
+              {result && !result._reset && (
                 <div style={{ marginTop: 16, padding: 16, background: '#f0fff4', borderRadius: 6 }}>
-                  <div style={{ fontWeight: 600, marginBottom: 8, color: '#276749' }}>✅ Upload Complete</div>
+                  <div style={{ fontWeight: 600, marginBottom: 8, color: '#276749' }}>Upload Complete</div>
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
                     <div>
                       <div style={{ fontSize: 24, fontWeight: 700, color: '#276749' }}>{result.added}</div>
@@ -144,6 +192,12 @@ export default function UploadPage() {
                       Warnings: {result.errors.join('; ')}
                     </div>
                   )}
+                </div>
+              )}
+
+              {result?._reset && (
+                <div style={{ marginTop: 16, padding: 12, background: '#ebf8ff', borderRadius: 6, color: '#2b6cb0' }}>
+                  Column mappings for <strong>{result.file_type}</strong> have been reset. New defaults will be applied on next upload.
                 </div>
               )}
             </div>
@@ -171,7 +225,7 @@ export default function UploadPage() {
                     history.map((h) => (
                       <tr key={h.id}>
                         <td>{h.filename}</td>
-                        <td style={{ textTransform: 'capitalize' }}>{h.file_type}</td>
+                        <td style={{ textTransform: 'capitalize' }}>{h.file_type.replace('_', ' ')}</td>
                         <td>{h.row_count || '—'}</td>
                         <td style={{ color: '#276749' }}>+{h.added_count}</td>
                         <td style={{ color: '#975a16' }}>~{h.updated_count}</td>

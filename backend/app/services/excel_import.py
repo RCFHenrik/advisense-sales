@@ -1,11 +1,15 @@
+import csv
 import io
-from datetime import datetime
+from datetime import date, datetime
 from typing import Dict, List, Optional, Tuple
 
 import openpyxl
 from sqlalchemy.orm import Session
 
-from app.models.models import Contact, Meeting, ColumnMapping, ContactStatusEnum
+from app.models.models import (
+    Contact, Meeting, ColumnMapping, ContactStatusEnum, JobTitleDomain,
+    ClassificationLookup,
+)
 from app.schemas.schemas import UploadDiffSummary
 
 
@@ -26,6 +30,42 @@ class ExcelImportService:
             .all()
         )
         return [m.logical_field for m in mappings]
+
+    def _read_file(self, content: bytes, filename: str = "") -> Tuple[List[str], List[Dict]]:
+        """Read Excel or CSV file and return headers + rows as list of dicts."""
+        is_csv = filename.lower().endswith(".csv")
+
+        if not is_csv:
+            # Try to detect CSV by checking if content starts with text (BOM or ASCII)
+            try:
+                text_start = content[:4]
+                if text_start.startswith(b'\xef\xbb\xbf') or all(
+                    b < 128 for b in text_start
+                ):
+                    # Likely text/CSV — try to parse as CSV
+                    is_csv = True
+                else:
+                    is_csv = False
+            except Exception:
+                is_csv = False
+
+        if is_csv:
+            return self._read_csv(content)
+        else:
+            return self._read_excel(content)
+
+    def _read_csv(self, content: bytes) -> Tuple[List[str], List[Dict]]:
+        """Read semicolon-delimited CSV file."""
+        text = content.decode("utf-8-sig")  # handles BOM
+        reader = csv.DictReader(io.StringIO(text), delimiter=";")
+        headers = reader.fieldnames or []
+        data = []
+        for row in reader:
+            if any(v is not None and str(v).strip() for v in row.values()):
+                data.append(row)
+        if not data:
+            raise ValueError("Empty file")
+        return list(headers), data
 
     def _read_excel(self, content: bytes) -> Tuple[List[str], List[Dict]]:
         """Read Excel file and return headers + rows as list of dicts."""
@@ -86,10 +126,20 @@ class ExcelImportService:
             return None
         if isinstance(val, datetime):
             return val
-        try:
-            return datetime.fromisoformat(str(val))
-        except (ValueError, TypeError):
+        val_str = str(val).strip()
+        if not val_str or val_str in ("#N/A", "N/A", "nan"):
             return None
+        try:
+            return datetime.fromisoformat(val_str)
+        except (ValueError, TypeError):
+            pass
+        # Try common date formats
+        for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%d/%m/%Y"):
+            try:
+                return datetime.strptime(val_str, fmt)
+            except ValueError:
+                continue
+        return None
 
     def _resolve_bool(self, row: Dict, mappings: Dict[str, str], logical_field: str) -> bool:
         val = self._resolve_value(row, mappings, logical_field)
@@ -98,14 +148,14 @@ class ExcelImportService:
         return val.lower() in ("true", "1", "yes", "x")
 
     def _resolve_optional_bool(self, row: Dict, mappings: Dict[str, str], logical_field: str):
-        """Like _resolve_bool but returns None when the field is absent/empty (so upserts preserve existing values)."""
+        """Like _resolve_bool but returns None when the field is absent/empty."""
         val = self._resolve_value(row, mappings, logical_field)
         if val is None:
             return None
         return val.lower() in ("true", "1", "yes", "x")
 
     def _dedup_key(self, row: Dict, mappings: Dict[str, str]) -> Optional[str]:
-        """Build deduplication key: email > record_id > (company_id, full_name)."""
+        """Build deduplication key: email > record_id > (company_name, full_name)."""
         email = self._resolve_value(row, mappings, "email")
         if email:
             return f"email:{email.lower()}"
@@ -114,21 +164,21 @@ class ExcelImportService:
         if record_id:
             return f"rid:{record_id}"
 
-        company_id = self._resolve_value(row, mappings, "associated_company_id")
+        company_name = self._resolve_value(row, mappings, "company_name")
         full_name = self._resolve_value(row, mappings, "full_name")
-        if company_id and full_name:
-            return f"comp:{company_id}:{full_name.lower()}"
+        if company_name and full_name:
+            return f"comp:{company_name.lower()}:{full_name.lower()}"
 
         return None
 
-    def import_contacts(self, content: bytes, batch_id: str, uploaded_by_id: int) -> UploadDiffSummary:
+    def import_contacts(self, content: bytes, batch_id: str, uploaded_by_id: int, filename: str = "") -> UploadDiffSummary:
         mappings = self._get_mappings("contacts")
         if not mappings:
             mappings = self._default_contact_mappings()
             self._save_default_mappings("contacts", mappings)
 
         required = self._get_required_fields("contacts")
-        headers, data = self._read_excel(content)
+        headers, data = self._read_file(content, filename)
 
         # Validate required mappings exist in headers
         errors = []
@@ -140,6 +190,12 @@ class ExcelImportService:
         if errors:
             raise ValueError("; ".join(errors))
 
+        # Load job title → domain mappings for derivation
+        domain_map = {}
+        for jtd in self.db.query(JobTitleDomain).all():
+            if jtd.domain and jtd.job_title:
+                domain_map[jtd.job_title.lower()] = jtd.domain
+
         # Build lookup of existing contacts by dedup key
         existing_contacts = self.db.query(Contact).all()
         existing_map: Dict[str, Contact] = {}
@@ -148,12 +204,13 @@ class ExcelImportService:
                 existing_map[f"email:{c.email.lower()}"] = c
             elif c.record_id:
                 existing_map[f"rid:{c.record_id}"] = c
-            elif c.associated_company_id and c.full_name:
-                existing_map[f"comp:{c.associated_company_id}:{c.full_name.lower()}"] = c
+            elif c.company_name and c.full_name:
+                existing_map[f"comp:{c.company_name.lower()}:{c.full_name.lower()}"] = c
 
         added = 0
         updated = 0
         seen_keys = set()
+        today = date.today()
 
         for row in data:
             key = self._dedup_key(row, mappings)
@@ -163,45 +220,57 @@ class ExcelImportService:
                 continue
             seen_keys.add(key)
 
+            last_activity_date = self._resolve_datetime(row, mappings, "last_activity_date")
+
+            # Calculate days_since_interaction and contacted_last_1y from LastContacted
+            days_since = None
+            contacted_1y = False
+            if last_activity_date:
+                days_since = (today - last_activity_date.date()).days
+                if days_since < 0:
+                    days_since = 0
+                contacted_1y = days_since <= 365
+
             contact_data = {
                 "record_id": self._resolve_value(row, mappings, "record_id"),
-                "first_name": self._resolve_value(row, mappings, "first_name"),
-                "last_name": self._resolve_value(row, mappings, "last_name"),
                 "full_name": self._resolve_value(row, mappings, "full_name"),
                 "email": self._resolve_value(row, mappings, "email"),
                 "job_title": self._resolve_value(row, mappings, "job_title"),
                 "company_name": self._resolve_value(row, mappings, "company_name"),
-                "associated_company_id": self._resolve_value(row, mappings, "associated_company_id"),
+                "client_name": self._resolve_value(row, mappings, "client_name"),
                 "sector": self._resolve_value(row, mappings, "sector"),
                 "client_tier": self._resolve_value(row, mappings, "client_tier"),
-                "responsibility_domain": self._resolve_value(row, mappings, "responsibility_domain"),
                 "group_domicile": self._resolve_value(row, mappings, "group_domicile"),
                 "owner_name": self._resolve_value(row, mappings, "owner_name"),
                 "owner_business_area": self._resolve_value(row, mappings, "owner_business_area"),
                 "owner_org_site": self._resolve_value(row, mappings, "owner_org_site"),
                 "owner_team": self._resolve_value(row, mappings, "owner_team"),
                 "owner_seniority": self._resolve_value(row, mappings, "owner_seniority"),
-                "last_activity_date": self._resolve_datetime(row, mappings, "last_activity_date"),
+                "last_activity_date": last_activity_date,
                 "revenue": self._resolve_float(row, mappings, "revenue"),
                 "has_historical_revenue": self._resolve_bool(row, mappings, "has_historical_revenue"),
-                "days_since_interaction": self._resolve_int(row, mappings, "days_since_interaction"),
-                "contacted_last_1y": self._resolve_bool(row, mappings, "contacted_last_1y"),
-                "relevant_search": self._resolve_optional_bool(row, mappings, "relevant_search"),
+                "days_since_interaction": days_since,
+                "contacted_last_1y": contacted_1y,
                 "hubspot_import_batch": batch_id,
             }
 
-            # Build full_name if missing
-            if not contact_data["full_name"] and contact_data["first_name"] and contact_data["last_name"]:
-                contact_data["full_name"] = f"{contact_data['last_name']}, {contact_data['first_name']}"
+            # Derive responsibility_domain from job title if available
+            job_title = contact_data.get("job_title")
+            if job_title and job_title.lower() in domain_map:
+                contact_data["responsibility_domain"] = domain_map[job_title.lower()]
+
+            # Also support direct mapping if present in file (backwards compat)
+            if "responsibility_domain" in mappings and not contact_data.get("responsibility_domain"):
+                direct_domain = self._resolve_value(row, mappings, "responsibility_domain")
+                if direct_domain:
+                    contact_data["responsibility_domain"] = direct_domain
 
             existing = existing_map.get(key)
             if existing:
                 file_lad = contact_data.get('last_activity_date')
-                # Determine whether the file's last_activity_date is newer than the app's
                 _file_lad_accepted = False
                 if file_lad is not None:
                     existing_lad = existing.last_activity_date
-                    # Normalise both to naive datetime for comparison
                     file_lad_n = file_lad.replace(tzinfo=None) if getattr(file_lad, 'tzinfo', None) else file_lad
                     existing_lad_n = existing_lad.replace(tzinfo=None) if existing_lad and getattr(existing_lad, 'tzinfo', None) else existing_lad
                     _file_lad_accepted = (existing_lad_n is None or file_lad_n > existing_lad_n)
@@ -212,12 +281,10 @@ class ExcelImportService:
                     if k == 'last_activity_date':
                         if _file_lad_accepted:
                             existing.last_activity_date = v
-                        # else: keep the app's newer value (e.g. set by a sent email)
                         continue
-                    if k == 'days_since_interaction':
-                        # Only accept the file's days_since value if the file's date was also accepted
+                    if k in ('days_since_interaction', 'contacted_last_1y'):
                         if _file_lad_accepted:
-                            existing.days_since_interaction = v
+                            setattr(existing, k, v)
                         continue
                     setattr(existing, k, v)
                 existing.status = ContactStatusEnum.ACTIVE
@@ -245,13 +312,13 @@ class ExcelImportService:
             errors=errors,
         )
 
-    def import_meetings(self, content: bytes, batch_id: str, uploaded_by_id: int) -> UploadDiffSummary:
+    def import_meetings(self, content: bytes, batch_id: str, uploaded_by_id: int, filename: str = "") -> UploadDiffSummary:
         mappings = self._get_mappings("meetings")
         if not mappings:
             mappings = self._default_meeting_mappings()
             self._save_default_mappings("meetings", mappings)
 
-        headers, data = self._read_excel(content)
+        headers, data = self._read_file(content, filename)
         errors = []
 
         existing_meetings = self.db.query(Meeting).all()
@@ -268,17 +335,20 @@ class ExcelImportService:
 
             meeting_data = {
                 "record_id": rid,
-                "employee_name": self._resolve_value(row, mappings, "activity_assigned_to"),
-                "employee_name_corrected": self._resolve_value(row, mappings, "name_correction"),
+                "employee_name": self._resolve_value(row, mappings, "employee_name"),
                 "activity_date": self._resolve_datetime(row, mappings, "activity_date"),
                 "details": self._resolve_value(row, mappings, "details"),
-                "outcome": self._resolve_value(row, mappings, "meeting_outcome"),
-                "associated_company": self._resolve_value(row, mappings, "associated_companies"),
+                "outcome": self._resolve_value(row, mappings, "outcome"),
+                "associated_company": self._resolve_value(row, mappings, "associated_company"),
                 "associated_contacts": self._resolve_value(row, mappings, "associated_contacts"),
-                "company_corrected": self._resolve_value(row, mappings, "company_corrected"),
                 "client_tier": self._resolve_value(row, mappings, "client_tier"),
                 "group_domicile": self._resolve_value(row, mappings, "group_domicile"),
                 "seniority": self._resolve_value(row, mappings, "seniority"),
+                "business_area": self._resolve_value(row, mappings, "business_area"),
+                "team": self._resolve_value(row, mappings, "team"),
+                "site": self._resolve_value(row, mappings, "site"),
+                "client_name": self._resolve_value(row, mappings, "client_name"),
+                "sector": self._resolve_value(row, mappings, "sector"),
                 "hubspot_import_batch": batch_id,
             }
 
@@ -313,52 +383,203 @@ class ExcelImportService:
             errors=errors,
         )
 
+    def import_jobtitle_domain(self, content: bytes) -> UploadDiffSummary:
+        """Import JobTitle→Domain mappings from Excel file."""
+        wb = openpyxl.load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+
+        # Try to find the LLM_GROUPINGS sheet
+        sheet_name = None
+        for name in wb.sheetnames:
+            if "GROUPING" in name.upper() or "LLM" in name.upper():
+                sheet_name = name
+                break
+        if not sheet_name:
+            sheet_name = wb.sheetnames[0]
+
+        ws = wb[sheet_name]
+        rows = list(ws.iter_rows(values_only=True))
+        wb.close()
+
+        if not rows:
+            raise ValueError("Empty file")
+
+        # Build existing lookup
+        existing = {jtd.job_title.lower(): jtd for jtd in self.db.query(JobTitleDomain).all()}
+
+        added = 0
+        updated = 0
+        total = 0
+
+        for row in rows[1:]:  # skip header
+            vals = list(row)
+            # Columns: (None, None, Num, JobTitle, Translation, LLM-GROUPINGS, PROPOSED AGGREGATES)
+            if len(vals) < 6:
+                continue
+
+            job_title = str(vals[3]).strip() if vals[3] else ""
+            domain = str(vals[5]).strip() if vals[5] else ""
+
+            if not job_title:
+                continue
+
+            total += 1
+
+            # Skip "No Domain Classification" as it means unclassified
+            if domain in ("No Domain Classification", ""):
+                domain = None
+
+            existing_jtd = existing.get(job_title.lower())
+            if existing_jtd:
+                if domain is not None and existing_jtd.domain != domain:
+                    existing_jtd.domain = domain
+                    updated += 1
+            else:
+                jtd = JobTitleDomain(job_title=job_title, domain=domain)
+                self.db.add(jtd)
+                added += 1
+
+        self.db.commit()
+
+        return UploadDiffSummary(
+            added=added,
+            updated=updated,
+            removed=0,
+            unchanged=total - added - updated,
+            total_rows=total,
+            errors=[],
+        )
+
+    def import_classification(self, content: bytes, filename: str = "") -> UploadDiffSummary:
+        """Import classification lookup data from CSV."""
+        headers, data = self._read_file(content, filename)
+
+        # Clear existing classification data (full replace)
+        self.db.query(ClassificationLookup).delete()
+
+        added = 0
+        field_map = {
+            "JobTitle": "job_title",
+            "ClientGroupDomicile": "client_group_domicile",
+            "ClientTier": "client_tier",
+            "ClientIndustry": "client_industry",
+            "NumContacts": "num_contacts",
+            "Meetings_Total": "meetings_total",
+            "TopBA_1": "top_ba_1",
+            "TopBA_1_Count": "top_ba_1_count",
+            "TopBA_1_Share": "top_ba_1_share",
+            "TopBA_2": "top_ba_2",
+            "TopBA_2_Count": "top_ba_2_count",
+            "TopBA_2_Share": "top_ba_2_share",
+            "TopTeam_1": "top_team_1",
+            "TopTeam_1_Count": "top_team_1_count",
+            "TopTeam_1_Share": "top_team_1_share",
+            "TopTeam_2": "top_team_2",
+            "TopTeam_2_Count": "top_team_2_count",
+            "TopTeam_2_Share": "top_team_2_share",
+            "TopRegistrator_1": "top_registrator_1",
+            "TopRegistrator_1_Count": "top_registrator_1_count",
+            "TopRegistrator_1_Share": "top_registrator_1_share",
+            "TopRegistrator_2": "top_registrator_2",
+            "TopRegistrator_2_Count": "top_registrator_2_count",
+            "TopRegistrator_2_Share": "top_registrator_2_share",
+            "Meetings_JRA_SA": "meetings_jra_sa",
+            "Meetings_Manager": "meetings_manager",
+            "Meetings_Senior_Manager": "meetings_senior_manager",
+            "Meetings_Director": "meetings_director",
+            "Meetings_Managing_Director": "meetings_managing_director",
+            "Meetings_Other": "meetings_other",
+        }
+
+        int_fields = {
+            "num_contacts", "meetings_total",
+            "top_ba_1_count", "top_ba_2_count",
+            "top_team_1_count", "top_team_2_count",
+            "top_registrator_1_count", "top_registrator_2_count",
+            "meetings_jra_sa", "meetings_manager", "meetings_senior_manager",
+            "meetings_director", "meetings_managing_director", "meetings_other",
+        }
+        float_fields = {
+            "top_ba_1_share", "top_ba_2_share",
+            "top_team_1_share", "top_team_2_share",
+            "top_registrator_1_share", "top_registrator_2_share",
+        }
+
+        for row in data:
+            record = {}
+            for csv_col, db_col in field_map.items():
+                val = row.get(csv_col)
+                if val is None or str(val).strip() in ("", "#N/A", "N/A", "nan"):
+                    record[db_col] = None
+                elif db_col in int_fields:
+                    try:
+                        record[db_col] = int(float(str(val).strip()))
+                    except (ValueError, TypeError):
+                        record[db_col] = None
+                elif db_col in float_fields:
+                    try:
+                        # Handle comma decimal separator
+                        record[db_col] = float(str(val).strip().replace(",", "."))
+                    except (ValueError, TypeError):
+                        record[db_col] = None
+                else:
+                    record[db_col] = str(val).strip()
+
+            self.db.add(ClassificationLookup(**record))
+            added += 1
+
+        self.db.commit()
+
+        return UploadDiffSummary(
+            added=added,
+            updated=0,
+            removed=0,
+            unchanged=0,
+            total_rows=len(data),
+            errors=[],
+        )
+
     def _default_contact_mappings(self) -> Dict[str, str]:
         return {
-            "record_id": "Record ID",
-            "first_name": "FirstName",
-            "last_name": "LastName",
-            "email": "CONTACT_Email",
-            "job_title": "CONTACT_JobTitle",
-            "company_name": "CONTACT_Company",
-            "associated_company_id": "Associated Company IDs (Primary)",
-            "sector": "CONTACT_Sector",
-            "client_tier": "CONTACT_ClientTier",
-            "responsibility_domain": "CONTACT_ResponsibilityDomain",
-            "group_domicile": "CONTACT_GroupDomicile",
-            "owner_name": "OWNER_CONTACT",
-            "owner_business_area": "OWNER_BusinessArea",
-            "owner_org_site": "OWNER_OrgSite",
-            "owner_team": "OWNER_Team",
-            "owner_seniority": "OWNER_SENIORITY",
-            "last_activity_date": "Last Activity Date",
-            "revenue": "CONTACT_Revenue",
-            "has_historical_revenue": "CONTACT_HasHistRevenue",
-            "days_since_interaction": "CONTACT_DaysSinceInteraction",
-            "contacted_last_1y": "CONTACT_ContactedLast1Y",
-            "relevant_search": "CONTACT_RelevantSearch",
-            "full_name": "CONTACT_FullName (L_F)",
-            "associated_company_primary": "Associated Company (Primary)",
+            "record_id": "RecordID",
+            "email": "ContactEmail",
+            "full_name": "ContactFullName",
+            "job_title": "JobTitle",
+            "company_name": "ClientGroup",
+            "client_name": "ClientName",
+            "sector": "ClientIndustry",
+            "client_tier": "ClientTier",
+            "group_domicile": "ClientGroupDomicile",
+            "owner_name": "ContactOwner",
+            "owner_business_area": "BusinessArea",
+            "owner_org_site": "Site",
+            "owner_team": "Team",
+            "owner_seniority": "ContactOwnerSeniority",
+            "last_activity_date": "LastContacted",
+            "revenue": "TotalRevenue",
+            "has_historical_revenue": "HasHistoricalRevenue",
         }
 
     def _default_meeting_mappings(self) -> Dict[str, str]:
         return {
-            "record_id": "Record ID",
-            "details": "Details",
-            "activity_date": "Activity date",
-            "activity_assigned_to": "Activity assigned to",
-            "associated_companies": "Associated Companies",
-            "associated_contacts": "Associated Contacts",
-            "meeting_outcome": "Meeting outcome",
-            "name_correction": "NameCorrection",
-            "company_corrected": "Company (corrected)",
+            "record_id": "RecordID",
+            "details": "MeetingDetails",
+            "activity_date": "MeetingDate",
+            "employee_name": "MeetingRegistrator",
+            "seniority": "MeetingRegistratorSeniority",
+            "business_area": "BusinessArea",
+            "team": "Team",
+            "site": "Site",
+            "associated_company": "ClientGroup",
+            "client_name": "ClientName",
             "client_tier": "ClientTier",
-            "group_domicile": "GroupDomicile",
-            "seniority": "Seniority",
+            "group_domicile": "ClientGroupDomicile",
+            "sector": "ClientIndustry",
+            "associated_contacts": "MeetingParticipant",
+            "outcome": "MeetingRegistrationStatus",
         }
 
     def _save_default_mappings(self, file_type: str, mappings: Dict[str, str]):
-        required_contacts = {"record_id", "email", "first_name", "last_name"}
+        required_contacts = {"record_id", "email"}
         required_meetings = {"record_id", "activity_date"}
 
         required_set = required_contacts if file_type == "contacts" else required_meetings
