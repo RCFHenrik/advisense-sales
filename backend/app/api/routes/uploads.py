@@ -1,5 +1,7 @@
+import os
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
@@ -14,6 +16,10 @@ from app.schemas.schemas import FileUploadOut, UploadDiffSummary, ConsultantUplo
 router = APIRouter()
 
 ALLOWED_DATA_EXTENSIONS = (".xlsx", ".xls", ".csv")
+
+# Directory to store uploaded consultant files for later batch-apply
+UPLOAD_STORAGE_DIR = Path(__file__).resolve().parent.parent.parent / "uploads" / "consultants"
+UPLOAD_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
 
 
 @router.post("/contacts", response_model=UploadDiffSummary)
@@ -166,6 +172,13 @@ async def upload_consultants(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+    # Save file to disk so it can be re-processed via batch-apply
+    ext = Path(file.filename).suffix
+    stored_filename = f"{batch_id}_{file.filename}"
+    stored_path = UPLOAD_STORAGE_DIR / stored_filename
+    with open(stored_path, "wb") as f:
+        f.write(content)
+
     db.add(FileUpload(
         file_type="consultants",
         filename=file.filename,
@@ -175,6 +188,7 @@ async def upload_consultants(
         removed_count=summary.skipped_duplicate,
         uploaded_by_id=current_user.id,
         batch_id=batch_id,
+        stored_path=str(stored_path),
     ))
     db.commit()
 

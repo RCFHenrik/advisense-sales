@@ -209,6 +209,7 @@ class Contact(Base):
     is_pinned = Column(Boolean, default=False)
     pinned_by_id = Column(Integer, ForeignKey("employees.id"), nullable=True)
     hubspot_import_batch = Column(String(100), nullable=True)
+    stop_flag_cleared_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=utcnow)
     updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
 
@@ -480,6 +481,7 @@ class FileUpload(Base):
     uploaded_at = Column(DateTime, default=utcnow)
     batch_id = Column(String(100), nullable=False)
     is_rolled_back = Column(Boolean, default=False)
+    stored_path = Column(String(500), nullable=True)  # path to saved file on disk
 
 
 # ── Job Title → Domain Mapping ──────────────────────────────────────

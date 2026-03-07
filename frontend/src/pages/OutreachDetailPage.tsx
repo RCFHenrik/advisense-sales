@@ -3,6 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import api from '../api/client';
 import type { OutreachRecord, NegationReason, Language, EmailTemplate, Contact, TemplateAttachment } from '../types';
+import { formatDateTime } from '../utils/dateFormat';
 
 const NEGATION_REASONS: { value: NegationReason; label: string }[] = [
   { value: 'wrong_person', label: 'Wrong person (left company / changed role)' },
@@ -395,9 +396,9 @@ export default function OutreachDetailPage() {
             {record.proposed_slot_1_start && (
               <div style={{ marginBottom: 16, fontSize: 13, color: '#718096' }}>
                 <strong>Proposed slots:</strong><br />
-                Slot 1: {new Date(record.proposed_slot_1_start).toLocaleString()} - {new Date(record.proposed_slot_1_end!).toLocaleString()}<br />
+                Slot 1: {formatDateTime(record.proposed_slot_1_start)} - {formatDateTime(record.proposed_slot_1_end)}<br />
                 {record.proposed_slot_2_start && (
-                  <>Slot 2: {new Date(record.proposed_slot_2_start).toLocaleString()} - {new Date(record.proposed_slot_2_end!).toLocaleString()}</>
+                  <>Slot 2: {formatDateTime(record.proposed_slot_2_start)} - {formatDateTime(record.proposed_slot_2_end)}</>
                 )}
               </div>
             )}

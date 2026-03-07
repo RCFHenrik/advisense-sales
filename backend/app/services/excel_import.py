@@ -325,11 +325,21 @@ class ExcelImportService:
         existing_meetings = self.db.query(Meeting).all()
         existing_by_rid = {m.record_id: m for m in existing_meetings if m.record_id}
 
+        # Pre-load contact lookup (name → id) to avoid N+1 queries
+        all_contacts = self.db.query(Contact.id, Contact.full_name).filter(
+            Contact.full_name.isnot(None)
+        ).all()
+        contact_by_name: dict = {}
+        for cid, cname in all_contacts:
+            if cname:
+                contact_by_name[cname.strip().lower()] = cid
+
         added = 0
         updated = 0
         seen_rids = set()
+        batch_size = 500
 
-        for row in data:
+        for i, row in enumerate(data):
             rid = self._resolve_value(row, mappings, "record_id")
             if rid:
                 seen_rids.add(rid)
@@ -353,14 +363,12 @@ class ExcelImportService:
                 "hubspot_import_batch": batch_id,
             }
 
-            # Try to link to contact
+            # Try to link to contact via in-memory lookup
             contact_name = self._resolve_value(row, mappings, "associated_contacts")
             if contact_name:
-                contact = self.db.query(Contact).filter(
-                    Contact.full_name.ilike(f"%{contact_name}%")
-                ).first()
-                if contact:
-                    meeting_data["contact_id"] = contact.id
+                cid = contact_by_name.get(contact_name.strip().lower())
+                if cid:
+                    meeting_data["contact_id"] = cid
 
             existing = existing_by_rid.get(rid) if rid else None
             if existing:
@@ -372,6 +380,10 @@ class ExcelImportService:
                 meeting = Meeting(**meeting_data)
                 self.db.add(meeting)
                 added += 1
+
+            # Flush in batches to avoid large memory buildup
+            if (i + 1) % batch_size == 0:
+                self.db.flush()
 
         self.db.commit()
 
@@ -425,9 +437,8 @@ class ExcelImportService:
 
             total += 1
 
-            # Skip "No Domain Classification" as it means unclassified
-            if domain in ("No Domain Classification", ""):
-                domain = None
+            if domain == "":
+                domain = "No Domain Classification"
 
             existing_jtd = existing.get(job_title.lower())
             if existing_jtd:
@@ -441,7 +452,10 @@ class ExcelImportService:
 
         self.db.commit()
 
-        return UploadDiffSummary(
+        # Apply domain mappings to all contacts with matching job titles
+        contacts_updated = self._apply_domains_to_contacts()
+
+        summary = UploadDiffSummary(
             added=added,
             updated=updated,
             removed=0,
@@ -449,6 +463,33 @@ class ExcelImportService:
             total_rows=total,
             errors=[],
         )
+        if contacts_updated > 0:
+            summary.errors.append(f"✓ {contacts_updated} contacts updated with domain mappings")
+        return summary
+
+    def _apply_domains_to_contacts(self) -> int:
+        """Update responsibility_domain on all contacts based on jobtitle_domains mappings."""
+        # Build lowercase lookup: job_title → domain (include all mappings)
+        jtd_map = {}
+        for jtd in self.db.query(JobTitleDomain).all():
+            domain = jtd.domain if jtd.domain else "No Domain Classification"
+            jtd_map[jtd.job_title.strip().lower()] = domain
+
+        if not jtd_map:
+            return 0
+
+        # Fetch contacts that have a job_title
+        contacts = self.db.query(Contact).filter(Contact.job_title.isnot(None)).all()
+        updated = 0
+        for c in contacts:
+            domain = jtd_map.get(c.job_title.strip().lower())
+            if domain is not None and c.responsibility_domain != domain:
+                c.responsibility_domain = domain
+                updated += 1
+
+        if updated:
+            self.db.commit()
+        return updated
 
     def import_classification(self, content: bytes, filename: str = "") -> UploadDiffSummary:
         """Import classification lookup data from CSV."""
@@ -542,37 +583,156 @@ class ExcelImportService:
     # ── Consultant batch import ─────────────────────────────────────────
 
     def _get_col(self, row: Dict, variants: List[str]) -> Optional[str]:
-        """Try multiple column name variants and return the first non-empty match."""
+        """Try multiple column name variants (case-insensitive) and return the first non-empty match."""
+        # Build a lowercase→value map once for case-insensitive matching
+        row_lower = {str(k).strip().lower(): v for k, v in row.items()}
         for v in variants:
-            val = row.get(v)
+            val = row_lower.get(v.lower())
             if val is not None:
                 s = str(val).strip()
                 if s and s.lower() not in ("", "#n/a", "n/a", "nan", "none"):
                     return s
         return None
 
-    def import_consultants(
-        self, content: bytes, batch_id: str, uploaded_by_id: int, filename: str = ""
-    ) -> ConsultantUploadSummary:
-        """Import consultants from CSV/Excel. All fields optional. Creates as PENDING."""
-        headers, data = self._read_file(content, filename)
+    def _is_active_consultant(self, row: Dict) -> bool:
+        """Check if a consultant row represents a currently active employee.
+        Returns True only if ValidToDT is 9999-12-31 (or the column is absent).
+        """
+        valid_to_raw = self._get_col(row, [
+            "ValidToDT", "ValidToDate", "Valid To", "ValidTo",
+            "EndDate", "End Date", "SlutDatum",
+        ])
+        if valid_to_raw is None:
+            # Column not present — treat as active
+            return True
 
-        # Build lookup maps (case-insensitive)
+        # Handle datetime objects (from Excel)
+        if isinstance(valid_to_raw, (datetime, date)):
+            d = valid_to_raw if isinstance(valid_to_raw, date) else valid_to_raw.date()
+            return d.year == 9999
+
+        # String comparison
+        s = str(valid_to_raw).strip()
+        return s.startswith("9999")
+
+    def _parse_consultant_row(self, row: Dict, i: int, ba_map, team_map, site_map, lang_map, sl_by_name, warnings):
+        """Parse a single consultant row, returning resolved fields dict or None for empty rows."""
+        name = self._get_col(row, [
+            "Name", "name", "FullName", "Full Name", "Namn",
+            "ConsultantName", "Consultant Name", "Consultant",
+        ])
+        email = self._get_col(row, ["Email", "email", "E-mail", "E-post", "Epost"])
+        seniority = self._get_col(row, [
+            "Seniority", "seniority", "Senioritet",
+            "ConsultantSeniority", "Consultant Seniority",
+        ])
+        ba_name = self._get_col(row, ["Business Area", "BusinessArea", "BA", "Affärsområde"])
+        team_name = self._get_col(row, ["Team", "team"])
+        site_name = self._get_col(row, ["Site", "site", "Office", "Kontor"])
+        lang_raw = self._get_col(row, ["Language", "language", "Lang", "Språk"])
+        site_lang_raw = self._get_col(row, [
+            "SiteLanguage", "Site Language", "SiteLanguages", "Site Languages",
+            "Språk (site)", "SiteSpråk",
+        ])
+
+        if not name and not email:
+            return None
+
+        # ── Resolve or auto-create BA ────────────────────────────────
+        ba_id = None
+        if ba_name:
+            ba_id = ba_map.get(ba_name.lower())
+            if not ba_id:
+                new_ba = BusinessArea(name=ba_name)
+                self.db.add(new_ba)
+                self.db.flush()
+                ba_map[ba_name.lower()] = new_ba.id
+                ba_id = new_ba.id
+                warnings.append(f"Row {i}: Business Area '{ba_name}' auto-created")
+
+        # ── Resolve or auto-create Team (linked to BA if known) ───
+        team_id = None
+        if team_name:
+            team_entry = team_map.get(team_name.lower())
+            if team_entry:
+                team_id = team_entry[0]
+            elif ba_id is not None:
+                # Team requires a business_area_id (NOT NULL FK)
+                new_team = Team(name=team_name, business_area_id=ba_id)
+                self.db.add(new_team)
+                self.db.flush()
+                team_map[team_name.lower()] = (new_team.id, ba_id)
+                team_id = new_team.id
+                warnings.append(f"Row {i}: Team '{team_name}' auto-created")
+            else:
+                warnings.append(f"Row {i}: Team '{team_name}' skipped (no Business Area)")
+
+        # ── Resolve or auto-create Site ───────────────────────────
+        site_id = None
+        if site_name:
+            site_id = site_map.get(site_name.lower())
+            if not site_id:
+                # Derive country_code from site name (e.g. "Site SE" → "SE")
+                country_code = "XX"
+                parts = site_name.split()
+                if len(parts) >= 2 and parts[0].lower() == "site":
+                    code_candidate = parts[-1].upper()
+                    if 2 <= len(code_candidate) <= 5:
+                        country_code = code_candidate
+                new_site = Site(name=site_name, country_code=country_code)
+                self.db.add(new_site)
+                self.db.flush()
+                site_map[site_name.lower()] = new_site.id
+                site_id = new_site.id
+                warnings.append(f"Row {i}: Site '{site_name}' auto-created (country_code={country_code})")
+
+        language = LanguageEnum.ENGLISH
+        if lang_raw:
+            language = lang_map.get(lang_raw.lower(), LanguageEnum.ENGLISH)
+        elif site_lang_raw:
+            # Derive primary language from SiteLanguage when no Language column
+            first_lang = site_lang_raw.replace(";", ",").split(",")[0].strip()
+            if first_lang:
+                language = lang_map.get(first_lang.lower(), LanguageEnum.ENGLISH)
+
+        resolved_sl_ids: List[int] = []
+        if site_lang_raw:
+            parts = [p.strip() for p in site_lang_raw.replace(";", ",").split(",") if p.strip()]
+            for part in parts:
+                sl_id = sl_by_name.get(part.lower())
+                if sl_id:
+                    if sl_id not in resolved_sl_ids:
+                        resolved_sl_ids.append(sl_id)
+                else:
+                    new_sl = SiteLanguage(name=part, is_active=True)
+                    self.db.add(new_sl)
+                    self.db.flush()
+                    sl_by_name[part.lower()] = new_sl.id
+                    resolved_sl_ids.append(new_sl.id)
+                    warnings.append(f"Row {i}: SiteLanguage '{part}' auto-created")
+
+        return {
+            "name": name, "email": email, "seniority": seniority,
+            "ba_id": ba_id, "team_id": team_id, "site_id": site_id,
+            "language": language, "resolved_sl_ids": resolved_sl_ids,
+        }
+
+    def _build_lookup_maps(self):
+        """Build common lookup maps used by consultant import."""
         ba_map = {ba.name.lower(): ba.id for ba in self.db.query(BusinessArea).all()}
         team_map: Dict[str, Tuple[int, int]] = {}
         for t in self.db.query(Team).all():
             team_map[t.name.lower()] = (t.id, t.business_area_id)
         site_map = {s.name.lower(): s.id for s in self.db.query(Site).all()}
-        existing_emails = {
-            e.email.lower() for e in self.db.query(Employee.email).all()
-        }
 
-        # Build site language lookup: name/code (case-insensitive) → SiteLanguage.id
         sl_by_name: Dict[str, int] = {}
-        for sl in self.db.query(SiteLanguage).filter(SiteLanguage.is_active == True).all():
+        for sl in self.db.query(SiteLanguage).all():
             sl_by_name[sl.name.lower()] = sl.id
             if sl.code:
                 sl_by_name[sl.code.lower()] = sl.id
+            # Reactivate inactive site languages so they can be assigned
+            if not sl.is_active:
+                sl.is_active = True
 
         lang_map: Dict[str, LanguageEnum] = {
             "sv": LanguageEnum.SWEDISH, "swedish": LanguageEnum.SWEDISH, "svenska": LanguageEnum.SWEDISH,
@@ -583,94 +743,55 @@ class ExcelImportService:
             "fi": LanguageEnum.FINNISH, "finnish": LanguageEnum.FINNISH, "finska": LanguageEnum.FINNISH,
         }
 
+        return ba_map, team_map, site_map, sl_by_name, lang_map
+
+    def import_consultants(
+        self, content: bytes, batch_id: str, uploaded_by_id: int, filename: str = ""
+    ) -> ConsultantUploadSummary:
+        """Import consultants from CSV/Excel. All fields optional. Creates as PENDING."""
+        headers, data = self._read_file(content, filename)
+
+        ba_map, team_map, site_map, sl_by_name, lang_map = self._build_lookup_maps()
+        existing_emails = set()
+        existing_names = set()
+        for e in self.db.query(Employee).all():
+            if e.email and "@placeholder.local" not in e.email:
+                existing_emails.add(e.email.lower())
+            if e.name:
+                existing_names.add(e.name.strip().lower())
+
         added = 0
         skipped = 0
         warnings: List[str] = []
-        # Track employee + site_language pairs to create after commit
-        pending_site_langs: List[Tuple] = []  # (Employee ref, List[site_language_id])
+        pending_site_langs: List[Tuple] = []
 
-        for i, row in enumerate(data, start=2):  # start=2 for row numbering (row 1 is header)
-            name = self._get_col(row, ["Name", "name", "FullName", "Full Name", "Namn"])
-            email = self._get_col(row, ["Email", "email", "E-mail", "E-post", "Epost"])
-            seniority = self._get_col(row, ["Seniority", "seniority", "Senioritet"])
-            ba_name = self._get_col(row, ["Business Area", "BusinessArea", "BA", "Affärsområde"])
-            team_name = self._get_col(row, ["Team", "team"])
-            site_name = self._get_col(row, ["Site", "site", "Office", "Kontor"])
-            lang_raw = self._get_col(row, ["Language", "language", "Lang", "Språk"])
-            site_lang_raw = self._get_col(row, [
-                "SiteLanguage", "Site Language", "SiteLanguages", "Site Languages",
-                "Språk (site)", "SiteSpråk",
-            ])
-
-            # Skip fully empty rows
-            if not name and not email:
+        for i, row in enumerate(data, start=2):
+            parsed = self._parse_consultant_row(row, i, ba_map, team_map, site_map, lang_map, sl_by_name, warnings)
+            if not parsed:
                 continue
 
-            # Skip duplicate emails
+            email = parsed["email"]
+            name = parsed["name"]
+
+            # Skip if already exists (by email or by name)
             if email and email.lower() in existing_emails:
                 skipped += 1
-                warnings.append(f"Row {i}: Email '{email}' already exists, skipped")
+                continue
+            if not email and name and name.strip().lower() in existing_names:
+                skipped += 1
                 continue
 
-            # Resolve Business Area
-            ba_id = None
-            if ba_name:
-                ba_id = ba_map.get(ba_name.lower())
-                if not ba_id:
-                    warnings.append(f"Row {i}: Business Area '{ba_name}' not found")
-
-            # Resolve Team
-            team_id = None
-            if team_name:
-                team_entry = team_map.get(team_name.lower())
-                if team_entry:
-                    team_id = team_entry[0]
-                else:
-                    warnings.append(f"Row {i}: Team '{team_name}' not found")
-
-            # Resolve Site
-            site_id = None
-            if site_name:
-                site_id = site_map.get(site_name.lower())
-                if not site_id:
-                    warnings.append(f"Row {i}: Site '{site_name}' not found")
-
-            # Resolve Language
-            language = LanguageEnum.ENGLISH
-            if lang_raw:
-                language = lang_map.get(lang_raw.lower(), LanguageEnum.ENGLISH)
-
-            # Resolve SiteLanguage(s) — may be comma or semicolon separated
-            resolved_sl_ids: List[int] = []
-            if site_lang_raw:
-                # Split by comma or semicolon
-                parts = [p.strip() for p in site_lang_raw.replace(";", ",").split(",") if p.strip()]
-                for part in parts:
-                    sl_id = sl_by_name.get(part.lower())
-                    if sl_id:
-                        if sl_id not in resolved_sl_ids:
-                            resolved_sl_ids.append(sl_id)
-                    else:
-                        # Auto-create the site language if it doesn't exist
-                        new_sl = SiteLanguage(name=part, is_active=True)
-                        self.db.add(new_sl)
-                        self.db.flush()  # get the ID
-                        sl_by_name[part.lower()] = new_sl.id
-                        resolved_sl_ids.append(new_sl.id)
-                        warnings.append(f"Row {i}: SiteLanguage '{part}' auto-created")
-
-            # Build placeholder email if missing
             emp_email = email or f"pending-{batch_id}-{i}@placeholder.local"
 
             emp = Employee(
                 name=name or "(No name)",
                 email=emp_email,
                 role=RoleEnum.CONSULTANT,
-                seniority=seniority,
-                business_area_id=ba_id,
-                team_id=team_id,
-                site_id=site_id,
-                primary_language=language,
+                seniority=parsed["seniority"],
+                business_area_id=parsed["ba_id"],
+                team_id=parsed["team_id"],
+                site_id=parsed["site_id"],
+                primary_language=parsed["language"],
                 is_active=False,
                 approval_status=ApprovalStatusEnum.PENDING,
                 uploaded_batch_id=batch_id,
@@ -679,11 +800,12 @@ class ExcelImportService:
             added += 1
             if email:
                 existing_emails.add(email.lower())
+            if name:
+                existing_names.add(name.strip().lower())
 
-            if resolved_sl_ids:
-                pending_site_langs.append((emp, resolved_sl_ids))
+            if parsed["resolved_sl_ids"]:
+                pending_site_langs.append((emp, parsed["resolved_sl_ids"]))
 
-        # Flush to get employee IDs, then create site language links
         self.db.flush()
         for emp, sl_ids in pending_site_langs:
             for sl_id in sl_ids:
@@ -695,6 +817,141 @@ class ExcelImportService:
         return ConsultantUploadSummary(
             added=added,
             skipped_duplicate=skipped,
+            warnings=warnings,
+            total_rows=len(data),
+        )
+
+    def import_consultants_upsert(
+        self, content: bytes, batch_id: str, uploaded_by_id: int, filename: str = ""
+    ) -> ConsultantUploadSummary:
+        """Import consultants with upsert: add new as APPROVED, update existing fields."""
+        headers, data = self._read_file(content, filename)
+
+        ba_map, team_map, site_map, sl_by_name, lang_map = self._build_lookup_maps()
+
+        # Build lookup of existing employees by email AND by name (fallback)
+        existing_by_email: Dict[str, Employee] = {}
+        existing_by_name: Dict[str, Employee] = {}
+        for emp in self.db.query(Employee).all():
+            if emp.email and "@placeholder.local" not in emp.email:
+                existing_by_email[emp.email.lower()] = emp
+            if emp.name:
+                existing_by_name[emp.name.strip().lower()] = emp
+
+        added = 0
+        updated = 0
+        deactivated = 0
+        warnings: List[str] = []
+        pending_site_langs: List[Tuple] = []
+
+        for i, row in enumerate(data, start=2):
+            # Check if consultant is still active (ValidToDT = 9999-12-31)
+            is_active = self._is_active_consultant(row)
+
+            parsed = self._parse_consultant_row(row, i, ba_map, team_map, site_map, lang_map, sl_by_name, warnings)
+            if not parsed:
+                continue
+
+            email = parsed["email"]
+            name = parsed["name"]
+
+            # Check if this consultant already exists (by email first, then by name)
+            existing_emp = None
+            if email:
+                existing_emp = existing_by_email.get(email.lower())
+            if not existing_emp and name:
+                existing_emp = existing_by_name.get(name.strip().lower())
+
+            # If consultant has left (ValidToDT is a real date), deactivate if they exist
+            if not is_active:
+                if existing_emp and existing_emp.is_active:
+                    existing_emp.is_active = False
+                    deactivated += 1
+                continue
+
+            if existing_emp:
+                # Upsert: update fields from file (file takes precedence)
+                changed = False
+                if parsed["name"] and parsed["name"] != existing_emp.name:
+                    existing_emp.name = parsed["name"]
+                    changed = True
+                if parsed["seniority"] is not None and parsed["seniority"] != existing_emp.seniority:
+                    existing_emp.seniority = parsed["seniority"]
+                    changed = True
+                if parsed["ba_id"] is not None and parsed["ba_id"] != existing_emp.business_area_id:
+                    existing_emp.business_area_id = parsed["ba_id"]
+                    changed = True
+                if parsed["team_id"] is not None and parsed["team_id"] != existing_emp.team_id:
+                    existing_emp.team_id = parsed["team_id"]
+                    changed = True
+                if parsed["site_id"] is not None and parsed["site_id"] != existing_emp.site_id:
+                    existing_emp.site_id = parsed["site_id"]
+                    changed = True
+                if parsed["language"] != existing_emp.primary_language:
+                    existing_emp.primary_language = parsed["language"]
+                    changed = True
+
+                # Update site languages: replace with file's set
+                if parsed["resolved_sl_ids"]:
+                    # Remove existing site language links
+                    self.db.query(EmployeeSiteLanguage).filter(
+                        EmployeeSiteLanguage.employee_id == existing_emp.id
+                    ).delete()
+                    for sl_id in parsed["resolved_sl_ids"]:
+                        esl = EmployeeSiteLanguage(employee_id=existing_emp.id, site_language_id=sl_id)
+                        self.db.add(esl)
+                    changed = True
+
+                # Ensure active + approved
+                if not existing_emp.is_active:
+                    existing_emp.is_active = True
+                    existing_emp.approval_status = ApprovalStatusEnum.APPROVED
+                    changed = True
+
+                if changed:
+                    updated += 1
+            else:
+                # New consultant — add as approved
+                emp_email = email or f"batch-{batch_id}-{i}@placeholder.local"
+
+                emp = Employee(
+                    name=parsed["name"] or "(No name)",
+                    email=emp_email,
+                    role=RoleEnum.CONSULTANT,
+                    seniority=parsed["seniority"],
+                    business_area_id=parsed["ba_id"],
+                    team_id=parsed["team_id"],
+                    site_id=parsed["site_id"],
+                    primary_language=parsed["language"],
+                    is_active=True,
+                    approval_status=ApprovalStatusEnum.APPROVED,
+                    uploaded_batch_id=batch_id,
+                )
+                self.db.add(emp)
+                added += 1
+                if email:
+                    existing_by_email[email.lower()] = emp
+                if name:
+                    existing_by_name[name.strip().lower()] = emp
+
+                if parsed["resolved_sl_ids"]:
+                    pending_site_langs.append((emp, parsed["resolved_sl_ids"]))
+
+        # Flush for new employee IDs, then create site language links
+        self.db.flush()
+        for emp, sl_ids in pending_site_langs:
+            for sl_id in sl_ids:
+                esl = EmployeeSiteLanguage(employee_id=emp.id, site_language_id=sl_id)
+                self.db.add(esl)
+
+        self.db.commit()
+
+        if deactivated > 0:
+            warnings.insert(0, f"{deactivated} former employees deactivated (ValidToDT is not 9999-12-31)")
+
+        return ConsultantUploadSummary(
+            added=added,
+            updated=updated,
             warnings=warnings,
             total_rows=len(data),
         )

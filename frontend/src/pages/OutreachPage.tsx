@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import api from '../api/client';
 import type { OutreachRecord, OutreachStatus } from '../types';
+import { formatDate } from '../utils/dateFormat';
 
 const STATUS_OPTIONS: { value: OutreachStatus | ''; label: string }[] = [
   { value: '', label: 'All Statuses' },
@@ -238,11 +239,11 @@ export default function OutreachPage() {
                     </td>
                     <td>{r.recommendation_score?.toFixed(0) || '—'}</td>
                     <td style={{ fontSize: 13 }}>
-                      {r.sent_at ? new Date(r.sent_at).toLocaleDateString() : '—'}
+                      {formatDate(r.sent_at)}
                     </td>
                     <td style={{ fontSize: 13 }}>{r.outcome || '—'}</td>
                     <td style={{ fontSize: 12, color: '#718096' }}>
-                      {new Date(r.updated_at).toLocaleDateString()}
+                      {formatDate(r.updated_at)}
                     </td>
                     <td>
                       <button

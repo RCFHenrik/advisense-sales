@@ -2,6 +2,8 @@ import { useState, useEffect, useMemo } from 'react';
 import { useAuth } from '../context/AuthContext';
 import api from '../api/client';
 import type { Contact, FilterOptions } from '../types';
+import { formatDate } from '../utils/dateFormat';
+import { Ban, Target, Mail, Clock } from 'lucide-react';
 
 type SortField = keyof Pick<
   Contact,
@@ -46,9 +48,10 @@ interface SortableThProps {
   field: SortField;
   sortKeys: SortKey[];
   onSort: (field: SortField) => void;
+  style?: React.CSSProperties;
 }
 
-function SortableTh({ label, field, sortKeys, onSort }: SortableThProps) {
+function SortableTh({ label, field, sortKeys, onSort, style }: SortableThProps) {
   const idx = sortKeys.findIndex(k => k.field === field);
   const active = idx >= 0;
   const dir = active ? sortKeys[idx].dir : null;
@@ -59,7 +62,7 @@ function SortableTh({ label, field, sortKeys, onSort }: SortableThProps) {
     <th
       onClick={() => onSort(field)}
       title="Click to add/toggle sort · click ×3 to remove"
-      style={{ cursor: 'pointer', userSelect: 'none', whiteSpace: 'nowrap' }}
+      style={{ cursor: 'pointer', userSelect: 'none', whiteSpace: 'nowrap', ...style }}
     >
       {label}
       <span style={{ marginLeft: 5, fontSize: 11, opacity: active ? 1 : 0.25 }}>
@@ -71,6 +74,39 @@ function SortableTh({ label, field, sortKeys, onSort }: SortableThProps) {
         </sup>
       )}
     </th>
+  );
+}
+
+function ContactStatusIcon({ flags, onClick }: { flags?: string[]; onClick?: () => void }) {
+  if (!flags || flags.length === 0) return null;
+
+  if (flags.includes('stop'))
+    return (
+      <span
+        onClick={onClick}
+        style={{ cursor: onClick ? 'pointer' : 'default', display: 'flex', alignItems: 'center' }}
+        title="Do not contact — click to clear (managers only)"
+      >
+        <Ban size={16} color="#e53e3e" />
+      </span>
+    );
+  if (flags.includes('mail_recent'))
+    return (
+      <span style={{ display: 'flex', alignItems: 'center' }} title="Mail sent within 7 days">
+        <Mail size={16} color="#3182ce" />
+      </span>
+    );
+  if (flags.includes('cooldown'))
+    return (
+      <span style={{ display: 'flex', alignItems: 'center' }} title="In cooldown period">
+        <Clock size={16} color="#d69e2e" />
+      </span>
+    );
+  // available = target
+  return (
+    <span style={{ display: 'flex', alignItems: 'center' }} title="Available for outreach">
+      <Target size={16} color="#38a169" />
+    </span>
   );
 }
 
@@ -143,6 +179,18 @@ export default function ContactsPage() {
       // Remove from stack
       return prev.filter(k => k.field !== field);
     });
+  };
+
+  const handleClearStop = async (contactId: number, contactName: string) => {
+    if (!window.confirm(`Remove stop flag for "${contactName}"? This will make the contact available for outreach again.`)) {
+      return;
+    }
+    try {
+      await api.post(`/contacts/${contactId}/clear-stop`);
+      fetchContacts();
+    } catch {
+      // handled by interceptor
+    }
   };
 
   const sortedContacts = useMemo(() => sortContacts(contacts, sortKeys), [contacts, sortKeys]);
@@ -243,18 +291,18 @@ export default function ContactsPage() {
           <table>
             <thead>
               <tr>
-                <th></th>
-                <SortableTh label="Name" field="full_name" sortKeys={sortKeys} onSort={handleSort} />
-                <SortableTh label="Company" field="company_name" sortKeys={sortKeys} onSort={handleSort} />
-                <SortableTh label="Title" field="job_title" sortKeys={sortKeys} onSort={handleSort} />
-                <th>Tier</th>
-                <SortableTh label="Domain" field="responsibility_domain" sortKeys={sortKeys} onSort={handleSort} />
-                <SortableTh label="Domicile" field="group_domicile" sortKeys={sortKeys} onSort={handleSort} />
-                <SortableTh label="Last Activity" field="last_activity_date" sortKeys={sortKeys} onSort={handleSort} />
-                <SortableTh label="Days Since" field="days_since_interaction" sortKeys={sortKeys} onSort={handleSort} />
-                <SortableTh label="Revenue" field="revenue" sortKeys={sortKeys} onSort={handleSort} />
-                <SortableTh label="Score" field="priority_score" sortKeys={sortKeys} onSort={handleSort} />
-                <th>Owner</th>
+                <th style={{ width: 40 }}></th>
+                <SortableTh label="Name" field="full_name" sortKeys={sortKeys} onSort={handleSort} style={{ minWidth: 160 }} />
+                <SortableTh label="Company" field="company_name" sortKeys={sortKeys} onSort={handleSort} style={{ minWidth: 140 }} />
+                <SortableTh label="Title" field="job_title" sortKeys={sortKeys} onSort={handleSort} style={{ minWidth: 120 }} />
+                <th style={{ width: 60 }}>Tier</th>
+                <SortableTh label="Domain" field="responsibility_domain" sortKeys={sortKeys} onSort={handleSort} style={{ minWidth: 100 }} />
+                <SortableTh label="Domicile" field="group_domicile" sortKeys={sortKeys} onSort={handleSort} style={{ width: 80 }} />
+                <SortableTh label="Last Activity" field="last_activity_date" sortKeys={sortKeys} onSort={handleSort} style={{ width: 110 }} />
+                <SortableTh label="Days Since" field="days_since_interaction" sortKeys={sortKeys} onSort={handleSort} style={{ width: 90 }} />
+                <SortableTh label="Revenue" field="revenue" sortKeys={sortKeys} onSort={handleSort} style={{ width: 100 }} />
+                <SortableTh label="Score" field="priority_score" sortKeys={sortKeys} onSort={handleSort} style={{ width: 70 }} />
+                <th style={{ minWidth: 100 }}>Owner</th>
               </tr>
             </thead>
             <tbody>
@@ -277,8 +325,21 @@ export default function ContactsPage() {
                       )}
                     </td>
                     <td>
-                      <div style={{ fontWeight: 500 }}>{c.full_name || `${c.first_name} ${c.last_name}`}</div>
-                      <div style={{ fontSize: 12, color: '#718096' }}>{c.email}</div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <ContactStatusIcon
+                          flags={c.contact_flags}
+                          onClick={
+                            c.contact_flags?.includes('stop') &&
+                            ['team_manager', 'ba_manager', 'admin'].includes(user?.role || '')
+                              ? () => handleClearStop(c.id, c.full_name || `${c.first_name} ${c.last_name}`)
+                              : undefined
+                          }
+                        />
+                        <div>
+                          <div style={{ fontWeight: 500 }}>{c.full_name || `${c.first_name} ${c.last_name}`}</div>
+                          <div style={{ fontSize: 12, color: '#718096' }}>{c.email}</div>
+                        </div>
+                      </div>
                     </td>
                     <td>
                       <div>{c.company_name}</div>
@@ -291,7 +352,7 @@ export default function ContactsPage() {
                     <td>{c.responsibility_domain}</td>
                     <td>{c.group_domicile}</td>
                     <td>
-                      {c.last_activity_date ? new Date(c.last_activity_date).toLocaleDateString() : '—'}
+                      {formatDate(c.last_activity_date)}
                     </td>
                     <td>
                       {c.days_since_interaction != null ? `${c.days_since_interaction}d` : '—'}

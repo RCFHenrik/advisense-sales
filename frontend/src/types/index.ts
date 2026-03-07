@@ -76,6 +76,7 @@ export interface Contact {
   status: string;
   priority_score?: number;
   is_pinned: boolean;
+  contact_flags?: string[];
   created_at: string;
 }
 

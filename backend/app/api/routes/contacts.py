@@ -1,4 +1,5 @@
 from typing import Optional, List
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
@@ -6,10 +7,117 @@ from sqlalchemy import or_, func
 
 from app.core.database import get_db
 from app.core.auth import get_current_user
+from app.core.config import settings
 from app.models.models import (
-    Contact, ContactStatusEnum, Employee, Meeting, OutreachRecord, OutreachStatusEnum, RoleEnum,
+    Contact, ContactStatusEnum, Employee, Meeting, Negation, NegationReasonEnum,
+    OutreachRecord, OutreachStatusEnum, RoleEnum, SystemConfig,
 )
 from app.schemas.schemas import ContactOut, ContactListResponse
+
+BLOCKING_NEGATION_REASONS = [
+    NegationReasonEnum.SENSITIVE_SITUATION,
+    NegationReasonEnum.NOT_APPROPRIATE_TIMING,
+    NegationReasonEnum.DO_NOT_CONTACT,
+]
+
+SENT_STATUSES = [
+    OutreachStatusEnum.SENT,
+    OutreachStatusEnum.REPLIED,
+    OutreachStatusEnum.MEETING_BOOKED,
+]
+
+
+def _get_cooldown_days(db: Session) -> int:
+    """Read cooldown_days_outreach from SystemConfig, or use default."""
+    config = db.query(SystemConfig).filter(SystemConfig.key == "cooldown_days_outreach").first()
+    if config:
+        try:
+            return int(config.value)
+        except ValueError:
+            pass
+    return settings.DEFAULT_COOLDOWN_DAYS_OUTREACH
+
+
+def _compute_contact_flags(
+    contact_ids: List[int], contacts: list, db: Session
+) -> dict:
+    """Compute status flags for a batch of contacts. Returns {contact_id: [flags]}."""
+    if not contact_ids:
+        return {}
+
+    now = datetime.now(timezone.utc)
+
+    # 1. Stop flags: contacts with blocking negations
+    stop_rows = (
+        db.query(OutreachRecord.contact_id, func.max(Negation.created_at))
+        .join(Negation, Negation.outreach_record_id == OutreachRecord.id)
+        .filter(
+            OutreachRecord.contact_id.in_(contact_ids),
+            Negation.reason.in_(BLOCKING_NEGATION_REASONS),
+        )
+        .group_by(OutreachRecord.contact_id)
+        .all()
+    )
+    stop_map = {cid: neg_date for cid, neg_date in stop_rows}
+
+    # 2. Mail sent recently (within 7 days)
+    seven_days_ago = now - timedelta(days=7)
+    mail_recent = set(
+        r[0] for r in db.query(OutreachRecord.contact_id)
+        .filter(
+            OutreachRecord.contact_id.in_(contact_ids),
+            OutreachRecord.sent_at >= seven_days_ago,
+            OutreachRecord.status.in_(SENT_STATUSES),
+        )
+        .distinct()
+        .all()
+    )
+
+    # 3. Cooldown (8 days to cooldown_days_outreach)
+    cooldown_days = _get_cooldown_days(db)
+    eight_days_ago = now - timedelta(days=8)
+    cooldown_start = now - timedelta(days=cooldown_days)
+    in_cooldown = set(
+        r[0] for r in db.query(OutreachRecord.contact_id)
+        .filter(
+            OutreachRecord.contact_id.in_(contact_ids),
+            OutreachRecord.sent_at >= cooldown_start,
+            OutreachRecord.sent_at < eight_days_ago,
+            OutreachRecord.status.in_(SENT_STATUSES),
+        )
+        .distinct()
+        .all()
+    )
+
+    # Build contact-specific cleared-at map
+    cleared_map = {c.id: c.stop_flag_cleared_at for c in contacts}
+
+    # Build flags per contact
+    flags_map = {}
+    for cid in contact_ids:
+        flags = []
+        neg_date = stop_map.get(cid)
+        cleared_at = cleared_map.get(cid)
+        if neg_date:
+            # Make timezone-aware for comparison if needed
+            if neg_date.tzinfo is None:
+                neg_date = neg_date.replace(tzinfo=timezone.utc)
+            if cleared_at is not None:
+                if cleared_at.tzinfo is None:
+                    cleared_at = cleared_at.replace(tzinfo=timezone.utc)
+                if neg_date > cleared_at:
+                    flags.append("stop")
+            else:
+                flags.append("stop")
+        if cid in mail_recent:
+            flags.append("mail_recent")
+        elif cid in in_cooldown:
+            flags.append("cooldown")
+        if not flags:
+            flags.append("available")
+        flags_map[cid] = flags
+
+    return flags_map
 
 router = APIRouter()
 
@@ -77,8 +185,19 @@ def list_contacts(
 
     contacts = query.offset((page - 1) * page_size).limit(page_size).all()
 
+    # Compute status flags for the page of contacts
+    contact_ids = [c.id for c in contacts]
+    flags_map = _compute_contact_flags(contact_ids, contacts, db)
+
+    # Build response with flags
+    contact_dicts = []
+    for c in contacts:
+        out = ContactOut.model_validate(c)
+        out.contact_flags = flags_map.get(c.id, ["available"])
+        contact_dicts.append(out)
+
     return ContactListResponse(
-        contacts=[ContactOut.model_validate(c) for c in contacts],
+        contacts=contact_dicts,
         total=total,
         page=page,
         page_size=page_size,
@@ -209,3 +328,22 @@ def get_meeting_participants(
         for r in rows
         if r.employee_name
     ]
+
+
+@router.post("/{contact_id}/clear-stop")
+def clear_stop_flag(
+    contact_id: int,
+    db: Session = Depends(get_db),
+    current_user: Employee = Depends(get_current_user),
+):
+    """Clear the stop flag for a contact (admin/manager only)."""
+    if current_user.role not in (RoleEnum.TEAM_MANAGER, RoleEnum.BA_MANAGER, RoleEnum.ADMIN):
+        raise HTTPException(status_code=403, detail="Only managers can clear stop flags")
+
+    contact = db.query(Contact).filter(Contact.id == contact_id).first()
+    if not contact:
+        raise HTTPException(status_code=404, detail="Contact not found")
+
+    contact.stop_flag_cleared_at = datetime.now(timezone.utc)
+    db.commit()
+    return {"cleared": True, "contact_id": contact_id}

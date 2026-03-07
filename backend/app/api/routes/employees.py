@@ -1,4 +1,6 @@
+from pathlib import Path
 from typing import Optional, List
+import uuid
 import bcrypt as _bcrypt
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -6,12 +8,15 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.auth import get_current_user, require_role
-from app.models.models import Employee, RoleEnum, ApprovalStatusEnum, EmployeeSiteLanguage, SiteLanguage, AuditLog
+from app.models.models import Employee, RoleEnum, ApprovalStatusEnum, EmployeeSiteLanguage, SiteLanguage, AuditLog, FileUpload
+from app.models.models import BusinessArea, Team, Site
 from app.schemas.schemas import (
     EmployeeOut, EmployeeCreate, EmployeeUpdate, EmployeeSelfUpdate,
     EmployeeTargetUpdate, EmployeeApprovalRequest, EmployeeSiteLanguageOut,
-    EmployeeRoleUpdate,
+    EmployeeRoleUpdate, ConsultantUploadSummary, FileUploadOut,
+    BulkDeactivateRequest, BulkUpdateRequest, BulkOperationResult,
 )
+from app.services.excel_import import ExcelImportService
 
 router = APIRouter()
 
@@ -111,6 +116,325 @@ def list_employees(
     if role:
         query = query.filter(Employee.role == role)
     return [_to_out(e) for e in query.order_by(Employee.name).all()]
+
+
+@router.get("/batch-uploads", response_model=List[FileUploadOut])
+def list_batch_uploads(
+    db: Session = Depends(get_db),
+    current_user: Employee = Depends(require_role(RoleEnum.ADMIN, RoleEnum.BA_MANAGER)),
+):
+    """List previously uploaded consultant files that can be used for batch-apply."""
+    uploads = (
+        db.query(FileUpload)
+        .filter(
+            FileUpload.file_type == "consultants",
+            FileUpload.stored_path.isnot(None),
+        )
+        .order_by(FileUpload.uploaded_at.desc())
+        .limit(20)
+        .all()
+    )
+    # Only include uploads where the stored file still exists on disk
+    result = []
+    for u in uploads:
+        if u.stored_path and Path(u.stored_path).is_file():
+            result.append(FileUploadOut.model_validate(u))
+    return result
+
+
+@router.post("/batch-apply/{upload_id}", response_model=ConsultantUploadSummary)
+def batch_apply_upload(
+    upload_id: int,
+    db: Session = Depends(get_db),
+    current_user: Employee = Depends(require_role(RoleEnum.ADMIN, RoleEnum.BA_MANAGER)),
+):
+    """Re-process a previously uploaded consultant file with upsert logic."""
+    upload = db.query(FileUpload).filter(FileUpload.id == upload_id).first()
+    if not upload:
+        raise HTTPException(status_code=404, detail="Upload record not found")
+    if upload.file_type != "consultants":
+        raise HTTPException(status_code=400, detail="This upload is not a consultants file")
+    if not upload.stored_path or not Path(upload.stored_path).is_file():
+        raise HTTPException(status_code=404, detail="Stored file no longer exists on disk")
+
+    # Read the file from disk
+    content = Path(upload.stored_path).read_bytes()
+
+    service = ExcelImportService(db)
+    batch_id = str(uuid.uuid4())[:8]
+
+    try:
+        summary = service.import_consultants_upsert(
+            content, batch_id, current_user.id, filename=upload.filename
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    # Log the batch-apply as an audit entry
+    db.add(AuditLog(
+        employee_id=current_user.id,
+        action="batch_apply",
+        entity_type="file_upload",
+        entity_id=upload.id,
+        details=f"Batch apply of '{upload.filename}': {summary.added} added, {summary.updated} updated",
+    ))
+    db.commit()
+
+    return summary
+
+
+# ── CSV options (BA/Team/Site from latest consultant file) ─────────────
+
+@router.get("/csv-options")
+def get_csv_options(
+    db: Session = Depends(get_db),
+    current_user: Employee = Depends(
+        require_role(RoleEnum.ADMIN, RoleEnum.BA_MANAGER, RoleEnum.TEAM_MANAGER)
+    ),
+):
+    """Extract distinct BA/Team/Site values from the latest uploaded consultant CSV."""
+    upload = (
+        db.query(FileUpload)
+        .filter(FileUpload.file_type == "consultants", FileUpload.stored_path.isnot(None))
+        .order_by(FileUpload.uploaded_at.desc())
+        .first()
+    )
+    if not upload or not upload.stored_path or not Path(upload.stored_path).is_file():
+        return {"business_areas": [], "teams_by_ba": {}, "sites": [], "source_file": None}
+
+    content = Path(upload.stored_path).read_bytes()
+    service = ExcelImportService(db)
+    try:
+        headers, data = service._read_file(content, upload.filename)
+    except ValueError:
+        return {"business_areas": [], "teams_by_ba": {}, "sites": [], "source_file": upload.filename}
+
+    ba_variants = ["Business Area", "BusinessArea", "BA", "Affärsområde"]
+    team_variants = ["Team", "team"]
+    site_variants = ["Site", "site", "Office", "Kontor"]
+
+    def get_col(row, variants):
+        row_lower = {str(k).strip().lower(): v for k, v in row.items()}
+        for v in variants:
+            val = row_lower.get(v.lower())
+            if val is not None:
+                s = str(val).strip()
+                if s and s.lower() not in ("", "#n/a", "n/a", "nan", "none"):
+                    return s
+        return None
+
+    ba_set = set()
+    teams_by_ba: dict = {}
+    site_set = set()
+
+    for row in data:
+        ba = get_col(row, ba_variants)
+        team = get_col(row, team_variants)
+        site = get_col(row, site_variants)
+        if ba:
+            ba_set.add(ba)
+        if site:
+            site_set.add(site)
+        if ba and team:
+            teams_by_ba.setdefault(ba, set()).add(team)
+        elif team:
+            teams_by_ba.setdefault("(No BA)", set()).add(team)
+
+    # Convert sets to sorted lists
+    return {
+        "business_areas": sorted(ba_set),
+        "teams_by_ba": {k: sorted(v) for k, v in teams_by_ba.items()},
+        "sites": sorted(site_set),
+        "source_file": upload.filename,
+    }
+
+
+# ── Bulk deactivate ───────────────────────────────────────────────────
+
+def _can_manage(current_user: Employee, emp: Employee) -> tuple:
+    """Check if current_user can manage emp. Returns (allowed: bool, reason: str)."""
+    if emp.id == current_user.id:
+        return False, "Cannot modify yourself"
+    if current_user.role == RoleEnum.TEAM_MANAGER:
+        if emp.team_id != current_user.team_id or emp.role != RoleEnum.CONSULTANT:
+            return False, f"{emp.name}: outside your team scope"
+    elif current_user.role == RoleEnum.BA_MANAGER:
+        if emp.business_area_id != current_user.business_area_id:
+            return False, f"{emp.name}: outside your business area scope"
+        if emp.role not in (RoleEnum.CONSULTANT, RoleEnum.TEAM_MANAGER):
+            return False, f"{emp.name}: cannot manage this role"
+    return True, ""
+
+
+@router.post("/bulk-deactivate", response_model=BulkOperationResult)
+def bulk_deactivate(
+    data: BulkDeactivateRequest,
+    db: Session = Depends(get_db),
+    current_user: Employee = Depends(
+        require_role(RoleEnum.ADMIN, RoleEnum.BA_MANAGER, RoleEnum.TEAM_MANAGER)
+    ),
+):
+    """Deactivate multiple employees at once, respecting role-based scope."""
+    employees = db.query(Employee).filter(Employee.id.in_(data.employee_ids)).all()
+    emp_map = {e.id: e for e in employees}
+
+    success = 0
+    skipped = 0
+    skipped_details = []
+
+    for eid in data.employee_ids:
+        emp = emp_map.get(eid)
+        if not emp:
+            skipped += 1
+            skipped_details.append(f"ID {eid}: not found")
+            continue
+        if not emp.is_active:
+            skipped += 1
+            skipped_details.append(f"{emp.name}: already inactive")
+            continue
+
+        allowed, reason = _can_manage(current_user, emp)
+        if not allowed:
+            skipped += 1
+            skipped_details.append(reason)
+            continue
+
+        # Last-admin guard
+        if emp.role == RoleEnum.ADMIN:
+            other_admins = db.query(Employee).filter(
+                Employee.role == RoleEnum.ADMIN, Employee.id != emp.id, Employee.is_active == True
+            ).count()
+            if other_admins == 0:
+                skipped += 1
+                skipped_details.append(f"{emp.name}: cannot deactivate the last administrator")
+                continue
+
+        emp.is_active = False
+        db.add(AuditLog(
+            employee_id=current_user.id,
+            action="bulk_deactivate",
+            entity_type="employee",
+            entity_id=emp.id,
+            details=f"{emp.name} deactivated by {current_user.name}",
+        ))
+        success += 1
+
+    db.commit()
+    return BulkOperationResult(success_count=success, skipped_count=skipped, skipped_details=skipped_details)
+
+
+# ── Bulk update ───────────────────────────────────────────────────────
+
+@router.patch("/bulk-update", response_model=BulkOperationResult)
+def bulk_update(
+    data: BulkUpdateRequest,
+    db: Session = Depends(get_db),
+    current_user: Employee = Depends(
+        require_role(RoleEnum.ADMIN, RoleEnum.BA_MANAGER, RoleEnum.TEAM_MANAGER)
+    ),
+):
+    """Update fields on multiple employees at once, respecting role-based scope."""
+    employees = db.query(Employee).filter(Employee.id.in_(data.employee_ids)).all()
+    emp_map = {e.id: e for e in employees}
+
+    # Resolve CSV-style names to DB IDs
+    resolved_ba_id = None
+    resolved_team_id = None
+    resolved_site_id = None
+
+    if data.business_area:
+        ba = db.query(BusinessArea).filter(BusinessArea.name == data.business_area).first()
+        if not ba:
+            ba = BusinessArea(name=data.business_area)
+            db.add(ba)
+            db.flush()
+        resolved_ba_id = ba.id
+
+    if data.team:
+        team = db.query(Team).filter(Team.name == data.team).first()
+        if not team:
+            team = Team(name=data.team, business_area_id=resolved_ba_id)
+            db.add(team)
+            db.flush()
+        resolved_team_id = team.id
+
+    if data.site:
+        site = db.query(Site).filter(Site.name == data.site).first()
+        if not site:
+            # Derive country_code from site name (e.g. "Site SE" → "SE")
+            country_code = "XX"
+            parts = data.site.split()
+            if len(parts) >= 2 and parts[0].lower() == "site":
+                code_candidate = parts[-1].upper()
+                if 2 <= len(code_candidate) <= 5:
+                    country_code = code_candidate
+            site = Site(name=data.site, country_code=country_code)
+            db.add(site)
+            db.flush()
+        resolved_site_id = site.id
+
+    # Resolve language
+    lang_map = {"sv": "sv", "no": "no", "da": "da", "en": "en", "de": "de", "fi": "fi"}
+    resolved_lang = lang_map.get(data.primary_language) if data.primary_language else None
+
+    success = 0
+    skipped = 0
+    skipped_details = []
+
+    for eid in data.employee_ids:
+        emp = emp_map.get(eid)
+        if not emp:
+            skipped += 1
+            skipped_details.append(f"ID {eid}: not found")
+            continue
+
+        allowed, reason = _can_manage(current_user, emp)
+        if not allowed:
+            skipped += 1
+            skipped_details.append(reason)
+            continue
+
+        changes = []
+        if data.name is not None and data.name != emp.name:
+            emp.name = data.name
+            changes.append("name")
+        if data.email is not None and data.email != emp.email:
+            emp.email = data.email
+            changes.append("email")
+        if data.seniority is not None and data.seniority != emp.seniority:
+            emp.seniority = data.seniority
+            changes.append("seniority")
+        if resolved_ba_id is not None and resolved_ba_id != emp.business_area_id:
+            emp.business_area_id = resolved_ba_id
+            changes.append("business_area")
+        if resolved_team_id is not None and resolved_team_id != emp.team_id:
+            emp.team_id = resolved_team_id
+            changes.append("team")
+        if resolved_site_id is not None and resolved_site_id != emp.site_id:
+            emp.site_id = resolved_site_id
+            changes.append("site")
+        if resolved_lang is not None and resolved_lang != emp.primary_language:
+            emp.primary_language = resolved_lang
+            changes.append("language")
+        if data.profile_description is not None and data.profile_description != emp.profile_description:
+            emp.profile_description = data.profile_description
+            changes.append("profile_description")
+
+        if changes:
+            db.add(AuditLog(
+                employee_id=current_user.id,
+                action="bulk_update",
+                entity_type="employee",
+                entity_id=emp.id,
+                details=f"{emp.name}: updated {', '.join(changes)} by {current_user.name}",
+            ))
+            success += 1
+        else:
+            skipped += 1
+            skipped_details.append(f"{emp.name}: no fields changed")
+
+    db.commit()
+    return BulkOperationResult(success_count=success, skipped_count=skipped, skipped_details=skipped_details)
 
 
 @router.patch("/me", response_model=EmployeeOut)
@@ -214,6 +538,56 @@ def approve_employee(
     elif data.approval_status == ApprovalStatusEnum.REJECTED:
         emp.is_active = False
 
+    db.commit()
+    db.refresh(emp)
+    return _to_out(emp)
+
+
+@router.patch("/{employee_id}/deactivate", response_model=EmployeeOut)
+def deactivate_employee(
+    employee_id: int,
+    db: Session = Depends(get_db),
+    current_user: Employee = Depends(
+        require_role(RoleEnum.ADMIN, RoleEnum.BA_MANAGER, RoleEnum.TEAM_MANAGER)
+    ),
+):
+    """Deactivate (soft-remove) a consultant. Sets is_active=False."""
+    emp = db.query(Employee).filter(Employee.id == employee_id).first()
+    if not emp:
+        raise HTTPException(status_code=404, detail="Employee not found")
+
+    # Cannot deactivate yourself
+    if emp.id == current_user.id:
+        raise HTTPException(status_code=400, detail="Cannot deactivate yourself")
+
+    # Scope enforcement
+    if current_user.role == RoleEnum.TEAM_MANAGER:
+        if emp.team_id != current_user.team_id or emp.role != RoleEnum.CONSULTANT:
+            raise HTTPException(status_code=403, detail="Can only remove consultants in your own team")
+    elif current_user.role == RoleEnum.BA_MANAGER:
+        if emp.business_area_id != current_user.business_area_id:
+            raise HTTPException(status_code=403, detail="Can only remove employees in your business area")
+        if emp.role not in (RoleEnum.CONSULTANT, RoleEnum.TEAM_MANAGER):
+            raise HTTPException(status_code=403, detail="Cannot remove this role")
+
+    # Last-admin guard
+    if emp.role == RoleEnum.ADMIN:
+        other_admins = db.query(Employee).filter(
+            Employee.role == RoleEnum.ADMIN,
+            Employee.id != emp.id,
+            Employee.is_active == True,
+        ).count()
+        if other_admins == 0:
+            raise HTTPException(status_code=400, detail="Cannot deactivate the last administrator")
+
+    emp.is_active = False
+    db.add(AuditLog(
+        employee_id=current_user.id,
+        action="deactivate",
+        entity_type="employee",
+        entity_id=emp.id,
+        details=f"{emp.name} deactivated by {current_user.name}",
+    ))
     db.commit()
     db.refresh(emp)
     return _to_out(emp)
