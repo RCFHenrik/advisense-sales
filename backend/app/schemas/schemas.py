@@ -82,9 +82,45 @@ class EmployeeRoleUpdate(BaseModel):
 
 class ConsultantUploadSummary(BaseModel):
     added: int
-    skipped_duplicate: int
+    updated: int = 0
+    skipped_duplicate: int = 0
     warnings: List[str]
     total_rows: int
+
+
+class BulkDeactivateRequest(BaseModel):
+    employee_ids: List[int]
+
+
+class BulkUpdateRequest(BaseModel):
+    employee_ids: List[int]
+    name: Optional[str] = None
+    email: Optional[str] = None
+    seniority: Optional[str] = None
+    business_area: Optional[str] = None
+    team: Optional[str] = None
+    site: Optional[str] = None
+    primary_language: Optional[str] = None
+    profile_description: Optional[str] = None
+
+
+class BulkOperationResult(BaseModel):
+    success_count: int
+    skipped_count: int
+    skipped_details: List[str]
+
+
+# ── System Reset ─────────────────────────────────────────────────────
+
+class ResetExecuteRequest(BaseModel):
+    confirmation_text: str       # Must be exactly "RESET"
+    backup_downloaded: bool      # Client asserts backup was downloaded
+
+
+class ResetRestoreResponse(BaseModel):
+    suppression_restored: int
+    contacts_flagged: int
+    warnings: List[str]
 
 
 class EmployeeOut(EmployeeBase):
@@ -199,6 +235,7 @@ class ContactOut(BaseModel):
     status: ContactStatusEnum
     priority_score: Optional[float] = None
     is_pinned: bool = False
+    contact_flags: List[str] = []
     created_at: datetime
 
     class Config:

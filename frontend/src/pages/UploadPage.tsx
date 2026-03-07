@@ -1,7 +1,9 @@
 import { useState, useEffect } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import api from '../api/client';
 import { useAuth } from '../context/AuthContext';
 import type { FileUploadRecord } from '../types';
+import { formatDateTime } from '../utils/dateFormat';
 
 type UploadTab = 'contacts' | 'meetings' | 'classification' | 'jobtitle_domain' | 'consultants';
 
@@ -40,7 +42,9 @@ const TAB_CONFIG: Record<UploadTab, { label: string; endpoint: string; accept: s
 
 export default function UploadPage() {
   const { user } = useAuth();
-  const [activeTab, setActiveTab] = useState<UploadTab>('contacts');
+  const [searchParams] = useSearchParams();
+  const initialTab = (searchParams.get('tab') as UploadTab) || 'contacts';
+  const [activeTab, setActiveTab] = useState<UploadTab>(initialTab);
   const [uploading, setUploading] = useState(false);
   const [result, setResult] = useState<any>(null);
   const [error, setError] = useState('');
@@ -288,7 +292,7 @@ export default function UploadPage() {
                         <td style={{ color: '#276749' }}>+{h.added_count}</td>
                         <td style={{ color: '#975a16' }}>~{h.updated_count}</td>
                         <td style={{ color: '#c53030' }}>-{h.removed_count}</td>
-                        <td>{new Date(h.uploaded_at).toLocaleString()}</td>
+                        <td>{formatDateTime(h.uploaded_at)}</td>
                         {isAdmin && (
                           <td>
                             <button
@@ -297,7 +301,7 @@ export default function UploadPage() {
                               onClick={() => handleDeleteUpload(h.id)}
                               title="Delete record"
                             >
-                              Del
+                              Delete
                             </button>
                           </td>
                         )}

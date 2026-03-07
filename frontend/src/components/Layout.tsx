@@ -1,16 +1,27 @@
 import { NavLink } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+import {
+  Gauge, Users, Send, FileText, Upload, UserCog, Settings, User,
+  type LucideIcon,
+} from 'lucide-react';
 
-const NAV_ITEMS = [
+interface NavItem {
+  section?: string;
+  path?: string;
+  label?: string;
+  icon?: LucideIcon;
+}
+
+const NAV_ITEMS: NavItem[] = [
   { section: 'Main' },
-  { path: '/', label: 'Dashboard', icon: '📊' },
-  { path: '/contacts', label: 'Contacts', icon: '👥' },
-  { path: '/outreach', label: 'Outreach', icon: '✉️' },
+  { path: '/', label: 'Dashboard', icon: Gauge },
+  { path: '/contacts', label: 'Contacts', icon: Users },
+  { path: '/outreach', label: 'Outreach', icon: Send },
   { section: 'Administration' },
-  { path: '/templates', label: 'Email Templates', icon: '📝' },
-  { path: '/upload', label: 'Data Upload', icon: '📤' },
-  { path: '/employees', label: 'Consultants', icon: '🏢' },
-  { path: '/admin', label: 'Settings', icon: '⚙️' },
+  { path: '/templates', label: 'Email Templates', icon: FileText },
+  { path: '/upload', label: 'Data Upload', icon: Upload },
+  { path: '/employees', label: 'Consultants', icon: UserCog },
+  { path: '/admin', label: 'Settings', icon: Settings },
 ];
 
 export default function Layout({ children }: { children: React.ReactNode }) {
@@ -35,7 +46,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
 
         <nav className="sidebar-nav">
           {NAV_ITEMS.map((item, i) => {
-            if ('section' in item && !('path' in item)) {
+            if (item.section && !item.path) {
               // Hide admin section for consultants
               if (item.section === 'Administration' && user?.role === 'consultant') return null;
               return <div key={i} className="sidebar-section">{item.section}</div>;
@@ -46,6 +57,8 @@ export default function Layout({ children }: { children: React.ReactNode }) {
             if (item.path === '/upload' && !['admin', 'ba_manager'].includes(user?.role || '')) return null;
             if (item.path === '/employees' && !['admin', 'ba_manager', 'team_manager'].includes(user?.role || '')) return null;
 
+            const IconComponent = item.icon;
+
             return (
               <NavLink
                 key={item.path}
@@ -53,7 +66,9 @@ export default function Layout({ children }: { children: React.ReactNode }) {
                 end={item.path === '/'}
                 className={({ isActive }) => `sidebar-link ${isActive ? 'active' : ''}`}
               >
-                <span>{item.icon}</span>
+                <span className="sidebar-icon">
+                  {IconComponent && <IconComponent size={18} />}
+                </span>
                 {item.label}
               </NavLink>
             );
@@ -65,7 +80,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
           className={({ isActive }) => `sidebar-link ${isActive ? 'active' : ''}`}
           style={{ marginTop: 'auto', marginBottom: 8 }}
         >
-          <span>👤</span> My Profile
+          <span className="sidebar-icon"><User size={18} /></span> My Profile
         </NavLink>
 
         <div className="sidebar-footer">

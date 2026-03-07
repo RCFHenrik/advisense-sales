@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { useAuth } from '../context/AuthContext';
 import api from '../api/client';
 import type { EmailTemplate, HotTopic, Language, TemplateAttachment } from '../types';
+import { formatDateShort } from '../utils/dateFormat';
 
 const LANGUAGES: { value: Language; label: string }[] = [
   { value: 'en', label: 'English' },
@@ -12,8 +13,7 @@ const LANGUAGES: { value: Language; label: string }[] = [
   { value: 'fi', label: 'Finnish' },
 ];
 
-const fmtDate = (iso?: string) =>
-  iso ? new Date(iso).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }) : '—';
+const fmtDate = (iso?: string) => formatDateShort(iso);
 
 const fmtFileSize = (bytes: number) => {
   if (bytes < 1024) return `${bytes} B`;

@@ -257,3 +257,19 @@ def run_migrations():
                 )
             """))
             conn.commit()
+
+        # ── FileUpload: add stored_path column if missing ──────────────────
+        fu_cols = [r[1] for r in conn.execute(text("PRAGMA table_info(file_uploads)")).fetchall()]
+        if "stored_path" not in fu_cols:
+            conn.execute(text(
+                "ALTER TABLE file_uploads ADD COLUMN stored_path VARCHAR(500)"
+            ))
+            conn.commit()
+
+        # ── Contact: add stop_flag_cleared_at column if missing ──────────
+        c_cols3 = [r[1] for r in conn.execute(text("PRAGMA table_info(contacts)")).fetchall()]
+        if "stop_flag_cleared_at" not in c_cols3:
+            conn.execute(text(
+                "ALTER TABLE contacts ADD COLUMN stop_flag_cleared_at DATETIME"
+            ))
+            conn.commit()

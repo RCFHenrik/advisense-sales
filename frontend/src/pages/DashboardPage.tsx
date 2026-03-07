@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import api from '../api/client';
 import { useAuth } from '../context/AuthContext';
 import type { OutreachRecord, Employee } from '../types';
+import { formatDate } from '../utils/dateFormat';
 
 interface ConsultantSummary {
   employee_id: number;
@@ -392,7 +393,7 @@ export default function DashboardPage() {
                         <td>
                           <span className={`badge badge-${r.status}`}>{r.status.replace(/_/g, ' ')}</span>
                         </td>
-                        <td style={{ fontSize: 13 }}>{new Date(r.created_at).toLocaleDateString()}</td>
+                        <td style={{ fontSize: 13 }}>{formatDate(r.created_at)}</td>
                         <td onClick={e => e.stopPropagation()}>
                           <button className="btn btn-sm btn-outline" onClick={() => navigate(`/outreach/${r.id}`)}>
                             View

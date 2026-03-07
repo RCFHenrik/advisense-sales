@@ -1,9 +1,10 @@
 import { useState, useEffect } from 'react';
 import api from '../api/client';
 import type { SystemConfigItem, ColumnMapping, SiteLanguageItem } from '../types';
+import { formatDateTime, formatDate } from '../utils/dateFormat';
 
 export default function AdminPage() {
-  const [tab, setTab] = useState<'config' | 'mappings' | 'suppression' | 'audit' | 'languages'>('config');
+  const [tab, setTab] = useState<'config' | 'mappings' | 'suppression' | 'audit' | 'languages' | 'reset'>('config');
   const [configs, setConfigs] = useState<SystemConfigItem[]>([]);
   const [mappings, setMappings] = useState<ColumnMapping[]>([]);
   const [suppression, setSuppression] = useState<any[]>([]);
@@ -18,12 +19,31 @@ export default function AdminPage() {
   const [newLangCode, setNewLangCode] = useState('');
   const [langSaving, setLangSaving] = useState(false);
 
+  // System reset state
+  const [resetStep, setResetStep] = useState<'preview' | 'confirm' | 'complete'>('preview');
+  const [resetPreview, setResetPreview] = useState<any>(null);
+  const [resetLoading, setResetLoading] = useState(false);
+  const [resetError, setResetError] = useState('');
+  const [backupDownloaded, setBackupDownloaded] = useState(false);
+  const [confirmText, setConfirmText] = useState('');
+  const [resetResult, setResetResult] = useState<any>(null);
+  const [restoreResult, setRestoreResult] = useState<any>(null);
+
   useEffect(() => {
     if (tab === 'config') api.get('/admin/config').then((r) => setConfigs(r.data)).catch(() => {});
     if (tab === 'mappings') api.get('/admin/column-mappings').then((r) => setMappings(r.data)).catch(() => {});
     if (tab === 'suppression') api.get('/admin/suppression-list').then((r) => setSuppression(r.data)).catch(() => {});
     if (tab === 'audit') api.get('/admin/audit-log').then((r) => setAuditLog(r.data)).catch(() => {});
     if (tab === 'languages') api.get('/admin/site-languages').then((r) => setSiteLanguages(r.data)).catch(() => {});
+    if (tab === 'reset') {
+      setResetStep('preview');
+      setBackupDownloaded(false);
+      setConfirmText('');
+      setResetError('');
+      setResetResult(null);
+      setRestoreResult(null);
+      api.get('/admin/reset-preview').then((r) => setResetPreview(r.data)).catch(() => {});
+    }
   }, [tab]);
 
   const handleSaveConfig = async (key: string) => {
@@ -78,6 +98,70 @@ export default function AdminPage() {
     }
   };
 
+  // ── System Reset handlers ────────────────────────────────
+  const handleDownloadBackup = async () => {
+    setResetLoading(true);
+    setResetError('');
+    try {
+      const res = await api.post('/admin/reset-backup', {}, { responseType: 'blob' });
+      const blob = new Blob([res.data], { type: 'application/json' });
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      const disposition = res.headers['content-disposition'];
+      const match = disposition?.match(/filename="(.+?)"/);
+      a.download = match ? match[1] : `salessupport_backup_${Date.now()}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      window.URL.revokeObjectURL(url);
+      setBackupDownloaded(true);
+    } catch {
+      setResetError('Failed to download backup.');
+    } finally {
+      setResetLoading(false);
+    }
+  };
+
+  const handleExecuteReset = async () => {
+    if (confirmText !== 'RESET') return;
+    setResetLoading(true);
+    setResetError('');
+    try {
+      const res = await api.post('/admin/reset-execute', {
+        confirmation_text: confirmText,
+        backup_downloaded: backupDownloaded,
+      });
+      setResetResult(res.data);
+      setResetStep('complete');
+    } catch (err: any) {
+      setResetError(err.response?.data?.detail || 'Reset failed.');
+    } finally {
+      setResetLoading(false);
+    }
+  };
+
+  const handleRestore = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setResetLoading(true);
+    setResetError('');
+    setRestoreResult(null);
+    const formData = new FormData();
+    formData.append('file', file);
+    try {
+      const res = await api.post('/admin/reset-restore', formData, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      });
+      setRestoreResult(res.data);
+    } catch (err: any) {
+      setResetError(err.response?.data?.detail || 'Restore failed.');
+    } finally {
+      setResetLoading(false);
+      e.target.value = '';
+    }
+  };
+
   return (
     <div>
       <div className="page-header">
@@ -100,6 +184,13 @@ export default function AdminPage() {
         </button>
         <button className={`tab ${tab === 'audit' ? 'active' : ''}`} onClick={() => setTab('audit')}>
           Audit Log
+        </button>
+        <button
+          className={`tab ${tab === 'reset' ? 'active' : ''}`}
+          onClick={() => setTab('reset')}
+          style={tab === 'reset' ? { color: 'var(--danger, #e53e3e)' } : { color: '#e53e3e' }}
+        >
+          System Reset
         </button>
       </div>
 
@@ -296,7 +387,7 @@ export default function AdminPage() {
                       <td>{s.contact_id}</td>
                       <td>{s.reason}</td>
                       <td>{s.hubspot_update_required ? 'Pending' : 'Done'}</td>
-                      <td>{new Date(s.created_at).toLocaleDateString()}</td>
+                      <td>{formatDate(s.created_at)}</td>
                       <td>
                         <button className="btn btn-sm btn-outline" onClick={() => handleRemoveSuppression(s.id)}>
                           Remove
@@ -332,7 +423,7 @@ export default function AdminPage() {
                   auditLog.map((l: any) => (
                     <tr key={l.id}>
                       <td style={{ fontSize: 12, whiteSpace: 'nowrap' }}>
-                        {new Date(l.timestamp).toLocaleString()}
+                        {formatDateTime(l.timestamp)}
                       </td>
                       <td>{l.employee_id || '—'}</td>
                       <td style={{ fontFamily: 'monospace', fontSize: 13 }}>{l.action}</td>
@@ -345,6 +436,216 @@ export default function AdminPage() {
                 )}
               </tbody>
             </table>
+          </div>
+        </div>
+      )}
+
+      {tab === 'reset' && (
+        <div className="card">
+          <div className="card-header" style={{ color: 'var(--danger, #e53e3e)' }}>
+            System Reset
+          </div>
+          <div className="card-body" style={{ padding: 20 }}>
+            {resetError && (
+              <div style={{ marginBottom: 12, padding: 8, background: '#fff5f5', borderRadius: 4, color: '#c53030', fontSize: 13 }}>
+                {resetError}
+              </div>
+            )}
+
+            {/* STEP 1: Preview */}
+            {resetStep === 'preview' && resetPreview && (
+              <div>
+                <div style={{
+                  padding: 16, marginBottom: 16, background: '#fff5f5',
+                  border: '2px solid var(--danger, #e53e3e)', borderRadius: 8,
+                }}>
+                  <div style={{ fontWeight: 700, fontSize: 16, color: '#c53030', marginBottom: 8 }}>
+                    Warning: This will permanently delete all imported data
+                  </div>
+                  <div style={{ fontSize: 13, color: '#742a2a', lineHeight: 1.6 }}>
+                    This action clears all contacts, meetings, outreach history, and lookup data.
+                    Configuration (employees, templates, teams, etc.) will be preserved.
+                    A backup of interaction data will be created first so you can restore knowledge about
+                    who was previously contacted.
+                  </div>
+                </div>
+
+                <h4 style={{ marginBottom: 12 }}>Data to be cleared:</h4>
+                <div className="table-wrapper">
+                  <table>
+                    <thead>
+                      <tr><th>Data</th><th style={{ textAlign: 'right' }}>Records</th></tr>
+                    </thead>
+                    <tbody>
+                      <tr><td>Contacts</td><td style={{ textAlign: 'right', fontWeight: 600 }}>{resetPreview.contacts_count}</td></tr>
+                      <tr><td>Meetings</td><td style={{ textAlign: 'right', fontWeight: 600 }}>{resetPreview.meetings_count}</td></tr>
+                      <tr><td>Outreach Records</td><td style={{ textAlign: 'right', fontWeight: 600 }}>{resetPreview.outreach_records_count}</td></tr>
+                      <tr><td>Negations</td><td style={{ textAlign: 'right', fontWeight: 600 }}>{resetPreview.negations_count}</td></tr>
+                      <tr><td>Suppression List</td><td style={{ textAlign: 'right', fontWeight: 600 }}>{resetPreview.suppression_entries_count}</td></tr>
+                      <tr><td>Imported Consultants</td><td style={{ textAlign: 'right', fontWeight: 600 }}>{resetPreview.imported_consultants_count}</td></tr>
+                      <tr><td>JobTitle Domains</td><td style={{ textAlign: 'right', fontWeight: 600 }}>{resetPreview.jobtitle_domains_count}</td></tr>
+                      <tr><td>Classification Lookups</td><td style={{ textAlign: 'right', fontWeight: 600 }}>{resetPreview.classification_lookups_count}</td></tr>
+                      <tr><td>File Uploads</td><td style={{ textAlign: 'right', fontWeight: 600 }}>{resetPreview.file_uploads_count}</td></tr>
+                      <tr>
+                        <td>Files on disk</td>
+                        <td style={{ textAlign: 'right', fontWeight: 600 }}>
+                          {resetPreview.files_on_disk_count} files ({resetPreview.files_on_disk_size_mb} MB)
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+
+                <div style={{ marginTop: 12, padding: 12, background: '#f0fff4', borderRadius: 6, fontSize: 13, color: '#276749' }}>
+                  <strong>Preserved:</strong> Admin/Manager accounts (non-imported), Business Areas, Teams, Sites,
+                  Email Templates, Hot Topics, System Config, Column Mappings, Bank Holidays, Site Languages, Audit Log.
+                </div>
+
+                <div style={{ marginTop: 20, display: 'flex', gap: 8, alignItems: 'center' }}>
+                  <button
+                    className="btn btn-primary"
+                    onClick={handleDownloadBackup}
+                    disabled={resetLoading}
+                  >
+                    {resetLoading ? 'Generating...' : 'Step 1: Download Backup'}
+                  </button>
+                  {backupDownloaded && (
+                    <button
+                      className="btn"
+                      style={{ background: 'var(--danger, #e53e3e)', color: '#fff', border: 'none' }}
+                      onClick={() => setResetStep('confirm')}
+                    >
+                      Step 2: Proceed to Reset
+                    </button>
+                  )}
+                </div>
+                {backupDownloaded && (
+                  <div style={{ marginTop: 8, fontSize: 13, color: '#276749' }}>
+                    Backup downloaded successfully. You may now proceed to reset.
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* STEP 2: Confirm */}
+            {resetStep === 'confirm' && (
+              <div>
+                <div style={{
+                  padding: 24, background: '#fff5f5',
+                  border: '2px solid var(--danger, #e53e3e)', borderRadius: 8,
+                  textAlign: 'center',
+                }}>
+                  <div style={{ fontSize: 48, marginBottom: 12 }}>&#9888;</div>
+                  <div style={{ fontWeight: 700, fontSize: 18, color: '#c53030', marginBottom: 12 }}>
+                    Final Confirmation
+                  </div>
+                  <div style={{ fontSize: 14, color: '#742a2a', marginBottom: 20, lineHeight: 1.6 }}>
+                    Type <strong>RESET</strong> below to confirm you want to permanently
+                    delete all imported data. This action cannot be undone.
+                  </div>
+                  <input
+                    className="form-control"
+                    placeholder='Type "RESET" to confirm'
+                    value={confirmText}
+                    onChange={(e) => setConfirmText(e.target.value.toUpperCase())}
+                    style={{ maxWidth: 300, margin: '0 auto', textAlign: 'center', fontSize: 18, letterSpacing: 4 }}
+                  />
+                  <div style={{ marginTop: 16, display: 'flex', justifyContent: 'center', gap: 8 }}>
+                    <button
+                      className="btn btn-outline"
+                      onClick={() => { setResetStep('preview'); setConfirmText(''); }}
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      className="btn"
+                      style={{
+                        background: confirmText === 'RESET' ? 'var(--danger, #e53e3e)' : '#e2e8f0',
+                        color: confirmText === 'RESET' ? '#fff' : '#a0aec0',
+                        border: 'none',
+                        cursor: confirmText === 'RESET' ? 'pointer' : 'not-allowed',
+                      }}
+                      disabled={confirmText !== 'RESET' || resetLoading}
+                      onClick={handleExecuteReset}
+                    >
+                      {resetLoading ? 'Resetting...' : 'Execute System Reset'}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* STEP 3: Complete */}
+            {resetStep === 'complete' && resetResult && (
+              <div>
+                <div style={{ padding: 16, background: '#f0fff4', borderRadius: 8, marginBottom: 16 }}>
+                  <div style={{ fontWeight: 600, color: '#276749', marginBottom: 8, fontSize: 16 }}>
+                    System Reset Complete
+                  </div>
+                  <div className="table-wrapper">
+                    <table>
+                      <thead>
+                        <tr><th>Cleared</th><th style={{ textAlign: 'right' }}>Count</th></tr>
+                      </thead>
+                      <tbody>
+                        {Object.entries(resetResult.deleted).map(([key, val]) => (
+                          <tr key={key}>
+                            <td style={{ textTransform: 'capitalize' }}>{key.replace(/_/g, ' ')}</td>
+                            <td style={{ textAlign: 'right', fontWeight: 600 }}>{val as number}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+                <div style={{ fontSize: 13, color: '#718096' }}>
+                  You can now import fresh data via the Data Upload page. To restore previously known
+                  interaction data (suppression list, contacted status), use the Restore section below.
+                </div>
+              </div>
+            )}
+
+            {/* ── Restore Section ── */}
+            <div style={{ marginTop: 32, paddingTop: 20, borderTop: '1px solid var(--border, #e2e8f0)' }}>
+              <h4 style={{ marginBottom: 8 }}>Restore from Backup</h4>
+              <div style={{ fontSize: 13, color: '#718096', marginBottom: 12 }}>
+                Upload a previously downloaded backup file to restore suppression lists
+                and flag contacts that were previously contacted.
+              </div>
+              <div style={{ position: 'relative', display: 'inline-block' }}>
+                <button className="btn btn-outline" disabled={resetLoading}>
+                  {resetLoading ? 'Restoring...' : 'Upload Backup File (.json)'}
+                </button>
+                <input
+                  type="file"
+                  accept=".json"
+                  onChange={handleRestore}
+                  disabled={resetLoading}
+                  style={{
+                    position: 'absolute', inset: 0, width: '100%', height: '100%',
+                    opacity: 0, cursor: resetLoading ? 'not-allowed' : 'pointer',
+                  }}
+                />
+              </div>
+
+              {restoreResult && (
+                <div style={{ marginTop: 12, padding: 12, background: '#f0fff4', borderRadius: 6 }}>
+                  <div style={{ fontWeight: 600, color: '#276749', marginBottom: 8 }}>Restore Complete</div>
+                  <div style={{ fontSize: 13 }}>
+                    <div>Suppression entries restored: <strong>{restoreResult.suppression_restored}</strong></div>
+                    <div>Contacts flagged as previously contacted: <strong>{restoreResult.contacts_flagged}</strong></div>
+                  </div>
+                  {restoreResult.warnings?.length > 0 && (
+                    <div style={{ marginTop: 8, maxHeight: 150, overflowY: 'auto' }}>
+                      <div style={{ fontWeight: 500, fontSize: 12, color: '#975a16' }}>Warnings:</div>
+                      {restoreResult.warnings.map((w: string, i: number) => (
+                        <div key={i} style={{ fontSize: 12, color: '#975a16' }}>{w}</div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
           </div>
         </div>
       )}
