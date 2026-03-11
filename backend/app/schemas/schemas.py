@@ -5,6 +5,7 @@ from pydantic import BaseModel, EmailStr
 from app.models.models import (
     RoleEnum, OutreachStatusEnum, NegationReasonEnum,
     ContactStatusEnum, LanguageEnum, ApprovalStatusEnum,
+    CampaignStatusEnum, CampaignRecipientStatusEnum,
 )
 
 
@@ -13,6 +14,12 @@ from app.models.models import (
 class LoginRequest(BaseModel):
     email: str
     password: str
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str
+    confirm_password: str
 
 
 class TokenResponse(BaseModel):
@@ -30,11 +37,13 @@ class EmployeeBase(BaseModel):
     seniority: Optional[str] = None
     primary_language: LanguageEnum = LanguageEnum.ENGLISH
     domain_expertise_tags: Optional[str] = None
+    relevance_tags: Optional[str] = None
     outreach_target_per_week: int = 3
     outreach_target_per_month: Optional[int] = None
     is_active: bool = True
     approval_status: ApprovalStatusEnum = ApprovalStatusEnum.APPROVED
     profile_description: Optional[str] = None
+    can_campaign: bool = False
 
 
 class EmployeeCreate(EmployeeBase):
@@ -54,6 +63,7 @@ class EmployeeUpdate(BaseModel):
     seniority: Optional[str] = None
     primary_language: Optional[LanguageEnum] = None
     domain_expertise_tags: Optional[str] = None
+    relevance_tags: Optional[str] = None
     outreach_target_per_week: Optional[int] = None
     is_active: Optional[bool] = None
     profile_description: Optional[str] = None
@@ -61,8 +71,11 @@ class EmployeeUpdate(BaseModel):
 
 class EmployeeSelfUpdate(BaseModel):
     """Fields any employee may update on their own profile."""
+    name: Optional[str] = None
+    email: Optional[str] = None
     profile_description: Optional[str] = None
     domain_expertise_tags: Optional[str] = None
+    relevance_tags: Optional[str] = None
     seniority: Optional[str] = None
 
 
@@ -102,6 +115,8 @@ class BulkUpdateRequest(BaseModel):
     site: Optional[str] = None
     primary_language: Optional[str] = None
     profile_description: Optional[str] = None
+    domain_expertise_tags: Optional[str] = None
+    relevance_tags: Optional[str] = None
 
 
 class BulkOperationResult(BaseModel):
@@ -131,8 +146,10 @@ class EmployeeOut(EmployeeBase):
     team_name: Optional[str] = None
     business_area_name: Optional[str] = None
     site_name: Optional[str] = None
+    site_country_code: Optional[str] = None
     uploaded_batch_id: Optional[str] = None
     site_languages: List["EmployeeSiteLanguageOut"] = []
+    must_change_password: bool = False
     created_at: datetime
 
     class Config:
@@ -201,6 +218,11 @@ class SiteLanguageCreate(BaseModel):
     code: Optional[str] = None
 
 
+class SiteLanguageUpdate(BaseModel):
+    name: Optional[str] = None
+    code: Optional[str] = None
+
+
 class EmployeeSiteLanguageOut(BaseModel):
     id: int
     site_language_id: int
@@ -218,6 +240,7 @@ class ContactOut(BaseModel):
     full_name: Optional[str] = None
     email: Optional[str] = None
     job_title: Optional[str] = None
+    original_job_title: Optional[str] = None
     company_name: Optional[str] = None
     client_name: Optional[str] = None
     sector: Optional[str] = None
@@ -227,6 +250,9 @@ class ContactOut(BaseModel):
     owner_name: Optional[str] = None
     owner_business_area: Optional[str] = None
     owner_team: Optional[str] = None
+    owner_seniority: Optional[str] = None
+    owner_org_site: Optional[str] = None
+    owner_email: Optional[str] = None
     last_activity_date: Optional[datetime] = None
     has_historical_revenue: bool = False
     revenue: Optional[float] = None
@@ -235,11 +261,31 @@ class ContactOut(BaseModel):
     status: ContactStatusEnum
     priority_score: Optional[float] = None
     is_pinned: bool = False
+    bounced_at: Optional[datetime] = None
+    expert_areas: Optional[str] = None
+    relevance_tags: Optional[str] = None
+    is_decision_maker: bool = False
+    opt_out_one_on_one: bool = False
+    opt_out_marketing_info: bool = False
     contact_flags: List[str] = []
+    coverage_gap_critical: int = 0
+    coverage_gap_potential: int = 0
     created_at: datetime
 
     class Config:
         from_attributes = True
+
+
+class ContactUpdate(BaseModel):
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    email: Optional[str] = None
+    job_title: Optional[str] = None
+    expert_areas: Optional[str] = None
+    relevance_tags: Optional[str] = None
+    is_decision_maker: Optional[bool] = None
+    opt_out_one_on_one: Optional[bool] = None
+    opt_out_marketing_info: Optional[bool] = None
 
 
 class ContactListResponse(BaseModel):
@@ -265,6 +311,7 @@ class OutreachRecordOut(BaseModel):
     proposed_slot_2_end: Optional[datetime] = None
     message_id: Optional[str] = None
     sent_at: Optional[datetime] = None
+    replied_at: Optional[datetime] = None
     outcome: Optional[str] = None
     outcome_notes: Optional[str] = None
     cooldown_override: bool = False
@@ -282,6 +329,13 @@ class OutreachRecordOut(BaseModel):
     employee_name: Optional[str] = None
     team_name: Optional[str] = None
     business_area_name: Optional[str] = None
+
+    # Redirect provenance
+    redirected_from_id: Optional[int] = None
+    redirected_by_id: Optional[int] = None
+    redirected_by_name: Optional[str] = None
+    redirected_at: Optional[datetime] = None
+    redirect_notes: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -323,6 +377,7 @@ class OutreachOverrideRequest(BaseModel):
 class NegationCreate(BaseModel):
     reason: NegationReasonEnum
     notes: Optional[str] = None
+    redirect_to_employee_id: Optional[int] = None
 
 
 class NegationOut(BaseModel):
@@ -332,6 +387,7 @@ class NegationOut(BaseModel):
     reason: NegationReasonEnum
     notes: Optional[str] = None
     created_at: datetime
+    redirected_outreach_id: Optional[int] = None
 
     class Config:
         from_attributes = True
@@ -467,6 +523,7 @@ class FileUploadOut(BaseModel):
     removed_count: int
     uploaded_at: datetime
     batch_id: str
+    uploaded_by_name: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -516,7 +573,7 @@ class SystemConfigOut(BaseModel):
     key: str
     value: str
     description: Optional[str] = None
-    updated_at: datetime
+    updated_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True
@@ -543,5 +600,283 @@ class AuditLogOut(BaseModel):
         from_attributes = True
 
 
+# ── Campaign Outreach ────────────────────────────────────────────────
+
+class CampaignCreate(BaseModel):
+    name: str
+    description: Optional[str] = None
+    email_subject: str = ""
+    email_body: str = ""
+    email_language: LanguageEnum = LanguageEnum.ENGLISH
+    template_id: Optional[int] = None
+    bcc_mode: bool = True
+
+
+class CampaignUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    email_subject: Optional[str] = None
+    email_body: Optional[str] = None
+    email_language: Optional[LanguageEnum] = None
+    template_id: Optional[int] = None
+    bcc_mode: Optional[bool] = None
+
+
+class CampaignRecipientOut(BaseModel):
+    id: int
+    campaign_id: int
+    contact_id: int
+    status: str
+    sent_at: Optional[datetime] = None
+    error_message: Optional[str] = None
+    created_at: Optional[datetime] = None
+    # Joined fields from Contact
+    contact_name: Optional[str] = None
+    contact_email: Optional[str] = None
+    contact_company: Optional[str] = None
+    contact_job_title: Optional[str] = None
+    contact_domain: Optional[str] = None
+    contact_domicile: Optional[str] = None
+    contact_tier: Optional[str] = None
+    contact_expert_areas: Optional[str] = None
+    contact_relevance_tags: Optional[str] = None
+    contact_is_decision_maker: bool = False
+    contact_relevant_search: Optional[bool] = None
+    # How the contact was added to the campaign
+    added_via: Optional[str] = None
+    # Consultant assignment fields
+    assigned_consultant_id: Optional[int] = None
+    assigned_consultant_name: Optional[str] = None
+    consultant_status: Optional[str] = None
+    custom_email_subject: Optional[str] = None
+    custom_email_body: Optional[str] = None
+    consultant_accepted_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class CampaignAttachmentOut(BaseModel):
+    id: int
+    campaign_id: int
+    original_filename: str
+    display_name: str
+    content_type: str
+    file_size_bytes: int
+    is_active: bool
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class CampaignOut(BaseModel):
+    id: int
+    name: str
+    description: Optional[str] = None
+    email_subject: str
+    email_body: str
+    email_language: LanguageEnum
+    template_id: Optional[int] = None
+    bcc_mode: bool
+    status: str
+    created_by_id: int
+    created_by_name: Optional[str] = None
+    recipient_count: int = 0
+    sent_count: int = 0
+    attachment_count: int = 0
+    scheduled_at: Optional[datetime] = None
+    sent_at: Optional[datetime] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class CampaignDetailOut(CampaignOut):
+    recipients: List[CampaignRecipientOut] = []
+    attachments: List[CampaignAttachmentOut] = []
+
+
+class FilterGroupSchema(BaseModel):
+    """A single filter group — all fields within a group are combined with AND."""
+    filter_client_tier: Optional[str] = None
+    filter_sector: Optional[str] = None
+    filter_responsibility_domain: Optional[str] = None
+    filter_group_domicile: Optional[str] = None
+    filter_owner_business_area: Optional[str] = None
+    filter_owner_team: Optional[str] = None
+    filter_search: Optional[str] = None
+    filter_expert_area: Optional[str] = None
+    filter_relevance_tag: Optional[str] = None
+    filter_is_decision_maker: Optional[bool] = None
+
+
+class FilterGroupsPreviewRequest(BaseModel):
+    """Request with multiple filter groups combined by an operator."""
+    groups: List[FilterGroupSchema]
+    combine: str = "or"  # "or" or "and"
+
+
+class FilterGroupsAddRequest(BaseModel):
+    """Add recipients using grouped filters and/or individual contact IDs."""
+    groups: Optional[List[FilterGroupSchema]] = None
+    combine: str = "or"
+    contact_ids: Optional[List[int]] = None
+
+
+class CampaignAddRecipientsRequest(BaseModel):
+    contact_ids: Optional[List[int]] = None
+    # Filter-based bulk add (flat — single group, backward compatible)
+    filter_client_tier: Optional[str] = None
+    filter_sector: Optional[str] = None
+    filter_responsibility_domain: Optional[str] = None
+    filter_group_domicile: Optional[str] = None
+    filter_owner_business_area: Optional[str] = None
+    filter_owner_team: Optional[str] = None
+    filter_search: Optional[str] = None
+    filter_expert_area: Optional[str] = None
+    filter_relevance_tag: Optional[str] = None
+    filter_is_decision_maker: Optional[bool] = None
+    # Grouped filters (new)
+    groups: Optional[List[FilterGroupSchema]] = None
+    combine: Optional[str] = None  # "or" or "and"
+
+
+class CampaignRemoveRecipientsRequest(BaseModel):
+    contact_ids: List[int]
+
+
+class AssignConsultantRequest(BaseModel):
+    consultant_id: int
+
+
+class CustomizeAssignmentRequest(BaseModel):
+    email_subject: Optional[str] = None
+    email_body: Optional[str] = None
+
+
+# ── Notifications ────────────────────────────────────────────────────
+
+class NotificationOut(BaseModel):
+    id: int
+    employee_id: int
+    notification_type: str
+    title: str
+    message: Optional[str] = None
+    link: Optional[str] = None
+    reference_type: Optional[str] = None
+    reference_id: Optional[int] = None
+    is_read: bool = False
+    created_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class UnreadCountOut(BaseModel):
+    count: int
+
+
+# ── Campaign Assignments (consultant view) ───────────────────────────
+
+class CampaignAssignmentOut(BaseModel):
+    """A single campaign recipient assigned to the current consultant."""
+    recipient_id: int
+    campaign_id: int
+    campaign_name: str
+    campaign_description: Optional[str] = None
+    contact_id: int
+    contact_name: Optional[str] = None
+    contact_email: Optional[str] = None
+    contact_company: Optional[str] = None
+    contact_job_title: Optional[str] = None
+    # Default email from campaign
+    default_email_subject: str
+    default_email_body: str
+    # Custom email (if consultant edited)
+    custom_email_subject: Optional[str] = None
+    custom_email_body: Optional[str] = None
+    consultant_status: Optional[str] = None
+    consultant_accepted_at: Optional[datetime] = None
+    campaign_status: str
+    # Campaign-level context for consultant summary
+    campaign_language: Optional[str] = None
+    campaign_created_by: Optional[str] = None
+    campaign_total_recipients: Optional[int] = None
+    campaign_attachment_names: Optional[list] = None
+    campaign_created_at: Optional[datetime] = None
+
+
+
+class CampaignAnalysisOut(BaseModel):
+    id: int
+    campaign_id: int
+    attachment_id: Optional[int] = None
+    extracted_themes: Optional[str] = None
+    suggested_tags: Optional[str] = None
+    status: str
+    error_message: Optional[str] = None
+    created_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class ExpertiseTagOut(BaseModel):
+    id: int
+    name: str
+
+    class Config:
+        from_attributes = True
+
+
 # Resolve forward references
 TokenResponse.model_rebuild()
+
+
+
+# ── Coverage Gaps ─────────────────────────────────────────────────────
+
+# ── Quick-Create Contact ─────────────────────────────────────────────
+
+class QuickCreateContactRequest(BaseModel):
+    name: str
+    email: str
+    company_name: Optional[str] = None
+    job_title: Optional[str] = None
+    responsibility_domain: Optional[str] = None
+
+
+class QuickCreateContactResponse(BaseModel):
+    id: int
+    full_name: str
+    email: str
+    company_name: Optional[str] = None
+    data_source: str
+
+    class Config:
+        from_attributes = True
+
+
+class CoverageGapOut(BaseModel):
+    id: int
+    company_name: str
+    industry: Optional[str] = None
+    tier: Optional[str] = None
+    contacts_in_crm: Optional[int] = None
+    critical_gap_count: int = 0
+    potential_gap_count: int = 0
+    total_gap_count: int = 0
+    missing_domains_critical: Optional[str] = None
+    missing_titles_critical: Optional[str] = None
+    missing_domains_potential: Optional[str] = None
+    missing_titles_potential: Optional[str] = None
+    created_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+

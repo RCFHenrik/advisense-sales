@@ -1,5 +1,6 @@
 import csv
 import io
+import json
 from datetime import date, datetime
 from typing import Dict, List, Optional, Tuple
 
@@ -10,6 +11,7 @@ from app.models.models import (
     Contact, Meeting, ColumnMapping, ContactStatusEnum, JobTitleDomain,
     ClassificationLookup, Employee, BusinessArea, Team, Site,
     LanguageEnum, RoleEnum, ApprovalStatusEnum, SiteLanguage, EmployeeSiteLanguage,
+    ExpertiseTag,
 )
 from app.schemas.schemas import UploadDiffSummary, ConsultantUploadSummary
 
@@ -56,9 +58,18 @@ class ExcelImportService:
             return self._read_excel(content)
 
     def _read_csv(self, content: bytes) -> Tuple[List[str], List[Dict]]:
-        """Read semicolon-delimited CSV file."""
-        text = content.decode("utf-8-sig")  # handles BOM
-        reader = csv.DictReader(io.StringIO(text), delimiter=";")
+        """Read CSV file with auto-detected delimiter (semicolon or pipe)."""
+        try:
+            text = content.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            text = content.decode("cp1252")  # fallback for Windows-encoded files
+        # Auto-detect delimiter: check first line for pipes vs semicolons
+        first_line = text.split("\n")[0]
+        if "|" in first_line and ";" not in first_line:
+            delimiter = "|"
+        else:
+            delimiter = ";"  # existing default
+        reader = csv.DictReader(io.StringIO(text), delimiter=delimiter)
         headers = reader.fieldnames or []
         data = []
         for row in reader:
@@ -255,6 +266,38 @@ class ExcelImportService:
                 "hubspot_import_batch": batch_id,
             }
 
+            # Normalize expert_areas to JSON array
+            raw_ea = self._resolve_value(row, mappings, "expert_areas")
+            if raw_ea:
+                if raw_ea.strip().startswith("["):
+                    contact_data["expert_areas"] = raw_ea.strip()
+                else:
+                    tags = [t.strip() for t in raw_ea.split(",") if t.strip()]
+                    contact_data["expert_areas"] = json.dumps(tags) if tags else None
+
+            # Normalize relevance_tags to JSON array
+            raw_rt = self._resolve_value(row, mappings, "relevance_tags")
+            if raw_rt:
+                if raw_rt.strip().startswith("["):
+                    contact_data["relevance_tags"] = raw_rt.strip()
+                else:
+                    rt_tags = [t.strip() for t in raw_rt.split(",") if t.strip()]
+                    contact_data["relevance_tags"] = json.dumps(rt_tags) if rt_tags else None
+
+            # Decision maker flag
+            dm_val = self._resolve_value(row, mappings, "is_decision_maker")
+            if dm_val is not None:
+                contact_data["is_decision_maker"] = str(dm_val).strip().lower() in ("true", "1", "yes", "x")
+
+            # Opt-out flags
+            optout_1on1 = self._resolve_value(row, mappings, "opt_out_one_on_one")
+            if optout_1on1 is not None:
+                contact_data["opt_out_one_on_one"] = str(optout_1on1).strip().lower() in ("true", "1", "yes", "x")
+
+            optout_marketing = self._resolve_value(row, mappings, "opt_out_marketing_info")
+            if optout_marketing is not None:
+                contact_data["opt_out_marketing_info"] = str(optout_marketing).strip().lower() in ("true", "1", "yes", "x")
+
             # Derive responsibility_domain from job title if available
             job_title = contact_data.get("job_title")
             if job_title and job_title.lower() in domain_map:
@@ -287,10 +330,19 @@ class ExcelImportService:
                         if _file_lad_accepted:
                             setattr(existing, k, v)
                         continue
+                    # Handle job_title: preserve user edits, update original
+                    if k == 'job_title':
+                        existing.original_job_title = v  # always track latest CRM value
+                        # If user has edited the title (job_title != original), keep their edit
+                        if existing.original_job_title and existing.job_title != existing.original_job_title:
+                            continue  # skip overwriting user's edited title
                     setattr(existing, k, v)
                 existing.status = ContactStatusEnum.ACTIVE
                 updated += 1
             else:
+                # Set original_job_title from CRM import
+                if contact_data.get("job_title"):
+                    contact_data["original_job_title"] = contact_data["job_title"]
                 contact = Contact(**contact_data)
                 self.db.add(contact)
                 added += 1
@@ -482,6 +534,8 @@ class ExcelImportService:
         contacts = self.db.query(Contact).filter(Contact.job_title.isnot(None)).all()
         updated = 0
         for c in contacts:
+            if not c.job_title:
+                continue
             domain = jtd_map.get(c.job_title.strip().lower())
             if domain is not None and c.responsibility_domain != domain:
                 c.responsibility_domain = domain
@@ -975,6 +1029,11 @@ class ExcelImportService:
             "last_activity_date": "LastContacted",
             "revenue": "TotalRevenue",
             "has_historical_revenue": "HasHistoricalRevenue",
+            "expert_areas": "ExpertAreas",
+            "relevance_tags": "RelevanceTags",
+            "is_decision_maker": "IsDecisionMaker",
+            "opt_out_one_on_one": "OptOut_OneOnOne",
+            "opt_out_marketing_info": "OptOut_MarketingInfo",
         }
 
     def _default_meeting_mappings(self) -> Dict[str, str]:
@@ -1011,3 +1070,309 @@ class ExcelImportService:
             )
             self.db.add(m)
         self.db.commit()
+
+    def import_expertise_tags(self, content: bytes, filename: str = "") -> UploadDiffSummary:
+        """Import expertise/relevance tags from CSV/Excel.
+
+        Supports two formats:
+        1. Per-contact mapping: columns include ContactEmail + RelevanceTags
+           -> updates Contact.relevance_tags for each matched contact
+        2. Simple tag list: single column with tag names
+           -> only updates the ExpertiseTag reference table
+
+        Both formats also maintain the ExpertiseTag reference table.
+        """
+        headers, data = self._read_file(content, filename)
+
+        if not headers:
+            raise ValueError("File has no columns")
+
+        # Detect per-contact mapping format
+        headers_lower = {h.lower().strip(): h for h in headers}
+        has_email_col = any(k in headers_lower for k in ("contactemail", "email", "contact_email"))
+        has_tags_col = any(k in headers_lower for k in ("relevancetags", "relevance_tags", "tags"))
+
+        if has_email_col and has_tags_col:
+            return self._import_relevance_tags_per_contact(headers_lower, data)
+        else:
+            return self._import_expertise_tags_simple(headers, data)
+
+    def _import_expertise_tags_simple(self, headers: List[str], data: List[Dict]) -> UploadDiffSummary:
+        """Original simple import: one tag per row or comma-separated in first column."""
+        first_col = headers[0]
+
+        raw_tags = []
+        for row in data:
+            val = row.get(first_col)
+            if val is None:
+                continue
+            cell = str(val).strip()
+            if not cell:
+                continue
+            for tag in cell.split(","):
+                tag = tag.strip()
+                if tag:
+                    raw_tags.append(tag)
+
+        if not raw_tags:
+            raise ValueError("No tags found in file")
+
+        seen = {}
+        for tag in raw_tags:
+            key = tag.lower()
+            if key not in seen:
+                seen[key] = tag
+
+        existing = {
+            et.name.lower(): et
+            for et in self.db.query(ExpertiseTag).all()
+        }
+
+        added = 0
+        unchanged = 0
+        reactivated = 0
+
+        for key, tag_name in seen.items():
+            if key in existing:
+                et = existing[key]
+                if not et.is_active:
+                    et.is_active = True
+                    reactivated += 1
+                else:
+                    unchanged += 1
+            else:
+                self.db.add(ExpertiseTag(name=tag_name, is_active=True))
+                added += 1
+
+        self.db.flush()
+
+        return UploadDiffSummary(
+            added=added,
+            updated=reactivated,
+            removed=0,
+            unchanged=unchanged,
+            total_rows=len(raw_tags),
+            errors=[],
+        )
+
+    def _import_relevance_tags_per_contact(self, headers_lower: Dict[str, str], data: List[Dict]) -> UploadDiffSummary:
+        """Import per-contact relevance tags: match by email, update Contact.relevance_tags."""
+        from sqlalchemy import func
+
+        # Resolve actual column names from headers
+        email_col = None
+        for key in ("contactemail", "email", "contact_email"):
+            if key in headers_lower:
+                email_col = headers_lower[key]
+                break
+
+        tags_col = None
+        for key in ("relevancetags", "relevance_tags", "tags"):
+            if key in headers_lower:
+                tags_col = headers_lower[key]
+                break
+
+        if not email_col or not tags_col:
+            raise ValueError("Could not find email and tags columns")
+
+        # Build email -> tags mapping from file
+        email_to_tags: Dict[str, List[str]] = {}
+        all_tags_set: Dict[str, str] = {}  # lowercase -> original casing
+
+        for row in data:
+            email_val = row.get(email_col)
+            tags_val = row.get(tags_col)
+            if not email_val or not tags_val:
+                continue
+            email = str(email_val).strip().lower()
+            if not email or "@" not in email:
+                continue
+
+            tags_str = str(tags_val).strip()
+            if not tags_str:
+                continue
+
+            tags = [t.strip() for t in tags_str.split(",") if t.strip()]
+            if not tags:
+                continue
+
+            email_to_tags[email] = tags
+            for t in tags:
+                key = t.lower()
+                if key not in all_tags_set:
+                    all_tags_set[key] = t
+
+        if not email_to_tags:
+            raise ValueError("No valid contact-tag mappings found in file")
+
+        # 1. Update ExpertiseTag reference table
+        existing_et = {
+            et.name.lower(): et
+            for et in self.db.query(ExpertiseTag).all()
+        }
+
+        et_added = 0
+        et_reactivated = 0
+        for key, tag_name in all_tags_set.items():
+            if key in existing_et:
+                et = existing_et[key]
+                if not et.is_active:
+                    et.is_active = True
+                    et_reactivated += 1
+            else:
+                self.db.add(ExpertiseTag(name=tag_name, is_active=True))
+                et_added += 1
+
+        self.db.flush()
+
+        # 2. Update Contact.relevance_tags for matched contacts
+        # Load ALL contacts with email and build two lookup dicts:
+        #   - exact email match
+        #   - email prefix match (part before @) as fallback for anonymized data
+        all_contacts = (
+            self.db.query(Contact)
+            .filter(Contact.email.isnot(None), Contact.email != "")
+            .all()
+        )
+
+        contacts_by_email: Dict[str, Contact] = {}
+        contacts_by_prefix: Dict[str, Contact] = {}
+        for c in all_contacts:
+            if c.email:
+                email_lower = c.email.lower().strip()
+                contacts_by_email[email_lower] = c
+                prefix = email_lower.split("@")[0]
+                contacts_by_prefix[prefix] = c
+
+        contacts_updated = 0
+        contacts_unchanged = 0
+        contacts_not_found = 0
+        matched_by_prefix = 0
+        errors = []
+
+        for email, tags in email_to_tags.items():
+            # Try exact email match first
+            contact = contacts_by_email.get(email)
+            if not contact:
+                # Fallback: match by email prefix (part before @)
+                prefix = email.split("@")[0]
+                contact = contacts_by_prefix.get(prefix)
+                if contact:
+                    matched_by_prefix += 1
+            if not contact:
+                contacts_not_found += 1
+                continue
+
+            new_tags_json = json.dumps(tags)
+            if contact.relevance_tags == new_tags_json:
+                contacts_unchanged += 1
+            else:
+                contact.relevance_tags = new_tags_json
+                contacts_updated += 1
+
+        self.db.flush()
+
+        if contacts_not_found > 0:
+            errors.append(f"{contacts_not_found} contacts not found in CRM (email not matched)")
+        if matched_by_prefix > 0:
+            errors.append(f"{matched_by_prefix} contacts matched by email prefix (domain differed)")
+
+        return UploadDiffSummary(
+            added=et_added,
+            updated=contacts_updated,
+            removed=0,
+            unchanged=contacts_unchanged,
+            total_rows=len(email_to_tags),
+            errors=errors,
+        )
+
+
+    def import_coverage_gaps(self, content: bytes, batch_id: str, filename: str = "") -> dict:
+        """Import coverage gap analysis from pipe-delimited CSV.
+
+        The file has 3-4 description/header rows before actual data.
+        Skip rows where 'Company' column is empty or looks like a description.
+        """
+        import json as _json
+        from app.models.models import CoverageGap
+
+        headers, data = self._read_file(content, filename)
+
+        # Full replace
+        self.db.query(CoverageGap).delete()
+
+        added = 0
+        skipped = 0
+        total_critical = 0
+        total_potential = 0
+
+        def safe_int(val):
+            if val is None:
+                return 0
+            try:
+                return int(float(str(val).strip()))
+            except (ValueError, TypeError):
+                return 0
+
+        def parse_list(val):
+            """Parse comma-separated string to JSON array, skip dashes."""
+            if not val:
+                return None
+            s = str(val).strip()
+            if not s or s in ("\u2013", "\u2014", "-", "\u2013", "N/A", "nan", "None"):
+                return None
+            items = [v.strip() for v in s.split(",") if v.strip() and v.strip() not in ("\u2013", "\u2014", "-")]
+            return _json.dumps(items) if items else None
+
+        # Check if this looks like a description row
+        skip_prefixes = ("industry peers", "=50%", "15-49%", "broad capability",
+                         "senior roles", "capabilities that", "missing domains",
+                         "missing titles", "company", "")
+
+        for row in data:
+            company = str(row.get("Company", "") or "").strip()
+
+            # Skip description/empty rows
+            if not company or company.lower() in skip_prefixes or len(company) < 3:
+                skipped += 1
+                continue
+
+            # Skip rows that look like column descriptions (contain keywords)
+            first_chars = company.lower()[:20]
+            if any(kw in first_chars for kw in ["industry peer", "=50%", "15-49%", "broad cap", "senior role"]):
+                skipped += 1
+                continue
+
+            gap = CoverageGap(
+                company_name=company,
+                company_name_normalized=company.lower().strip(),
+                industry=str(row.get("Industry", "") or "").strip() or None,
+                tier=str(row.get("Tier", "") or "").strip() or None,
+                contacts_in_crm=safe_int(row.get("Contacts in CRM")),
+                critical_gap_count=safe_int(row.get("Critical Gaps")),
+                potential_gap_count=safe_int(row.get("Potential Gaps")),
+                total_gap_count=safe_int(row.get("Total Gaps")),
+                missing_domains_critical=parse_list(row.get("Missing Domains (most peers have this)")),
+                missing_titles_critical=parse_list(row.get("Missing Titles (most peers have this)")),
+                missing_domains_potential=parse_list(row.get("Missing Domains (some peers have this)")),
+                missing_titles_potential=parse_list(row.get("Missing Titles (some peers have this)")),
+                upload_batch_id=batch_id,
+            )
+            self.db.add(gap)
+            added += 1
+            total_critical += gap.critical_gap_count
+            total_potential += gap.potential_gap_count
+
+        self.db.commit()
+
+        return {
+            "added": added,
+            "updated": 0,
+            "removed": 0,
+            "total_rows": len(data),
+            "skipped_header_rows": skipped,
+            "companies_with_gaps": added,
+            "total_critical_gaps": total_critical,
+            "total_potential_gaps": total_potential,
+        }
+

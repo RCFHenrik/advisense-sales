@@ -16,9 +16,12 @@ from app.api.routes import (
     dashboard,
     admin,
     meetings,
+    campaigns,
+    notifications,
 )
 
-# Run schema migrations, then create any missing tables
+# Run legacy migrations (safe to call repeatedly), then create any missing tables.
+# New schema changes should use Alembic: `alembic revision --autogenerate -m "description"`
 run_migrations()
 Base.metadata.create_all(bind=engine)
 
@@ -31,7 +34,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000", "http://localhost:8001"],
+    allow_origins=settings.allowed_origins_list,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -49,6 +52,8 @@ app.include_router(uploads.router, prefix="/api/uploads", tags=["File Uploads"])
 app.include_router(dashboard.router, prefix="/api/dashboard", tags=["Dashboard"])
 app.include_router(admin.router, prefix="/api/admin", tags=["Admin"])
 app.include_router(meetings.router, prefix="/api/meetings", tags=["Meetings"])
+app.include_router(campaigns.router, prefix="/api/campaigns", tags=["Campaigns"])
+app.include_router(notifications.router, prefix="/api/notifications", tags=["Notifications"])
 
 
 @app.get("/api/health")

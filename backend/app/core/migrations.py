@@ -25,28 +25,32 @@ def run_migrations():
         gr_id = gr_row[0]
 
         # Move "Risk Modelling SE" team into Global Risk BA
-        conn.execute(text(
-            f"UPDATE teams SET business_area_id = {gr_id} WHERE name = 'Risk Modelling SE'"
-        ))
+        conn.execute(
+            text("UPDATE teams SET business_area_id = :ba_id WHERE name = 'Risk Modelling SE'"),
+            {"ba_id": gr_id},
+        )
 
         # Update all 4 test employee BAs to Global Risk
-        conn.execute(text(
-            f"UPDATE employees SET business_area_id = {gr_id} WHERE email IN ("
-            f"'anna.lindqvist@advisense.com',"
-            f"'erik.johansson@advisense.com',"
-            f"'maria.svensson@advisense.com',"
-            f"'katrine.nielsen@advisense.com')"
-        ))
+        conn.execute(
+            text(
+                "UPDATE employees SET business_area_id = :ba_id WHERE email IN ("
+                "'anna.lindqvist@advisense.com',"
+                "'erik.johansson@advisense.com',"
+                "'maria.svensson@advisense.com',"
+                "'katrine.nielsen@advisense.com')"
+            ),
+            {"ba_id": gr_id},
+        )
 
         # Move katrine into Risk Modelling SE team so team_manager scope covers her
         rse_row = conn.execute(text(
             "SELECT id FROM teams WHERE name = 'Risk Modelling SE'"
         )).fetchone()
         if rse_row:
-            conn.execute(text(
-                f"UPDATE employees SET team_id = {rse_row[0]} "
-                f"WHERE email = 'katrine.nielsen@advisense.com'"
-            ))
+            conn.execute(
+                text("UPDATE employees SET team_id = :team_id WHERE email = 'katrine.nielsen@advisense.com'"),
+                {"team_id": rse_row[0]},
+            )
 
         conn.commit()
 
@@ -271,5 +275,346 @@ def run_migrations():
         if "stop_flag_cleared_at" not in c_cols3:
             conn.execute(text(
                 "ALTER TABLE contacts ADD COLUMN stop_flag_cleared_at DATETIME"
+            ))
+            conn.commit()
+
+        # ── System Config: seed FX rate entries if missing ────────────
+        fx_defaults = [
+            ("fx_rate_EUR", "0.087", "Exchange rate SEK → EUR"),
+            ("fx_rate_NOK", "1.031", "Exchange rate SEK → NOK"),
+            ("fx_rate_DKK", "0.649", "Exchange rate SEK → DKK"),
+            ("fx_rate_GBP", "0.073", "Exchange rate SEK → GBP"),
+        ]
+        for key, val, desc in fx_defaults:
+            exists = conn.execute(
+                text("SELECT 1 FROM system_config WHERE key = :k"), {"k": key}
+            ).fetchone()
+            if not exists:
+                conn.execute(
+                    text("INSERT INTO system_config (key, value, description) VALUES (:k, :v, :d)"),
+                    {"k": key, "v": val, "d": desc},
+                )
+        conn.commit()
+
+        # ── Employee: add can_campaign column if missing ─────────────────
+        emp_cols2 = [r[1] for r in conn.execute(text("PRAGMA table_info(employees)")).fetchall()]
+        if "can_campaign" not in emp_cols2:
+            conn.execute(text(
+                "ALTER TABLE employees ADD COLUMN can_campaign BOOLEAN DEFAULT 0"
+            ))
+            conn.commit()
+
+        # ── Campaign tables ─────────────────────────────────────────────
+        tables_latest = [r[0] for r in conn.execute(text(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )).fetchall()]
+
+        if "campaigns" not in tables_latest:
+            conn.execute(text("""
+                CREATE TABLE campaigns (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name VARCHAR(300) NOT NULL,
+                    description TEXT,
+                    email_subject VARCHAR(500) NOT NULL DEFAULT '',
+                    email_body TEXT NOT NULL DEFAULT '',
+                    email_language VARCHAR(10) NOT NULL DEFAULT 'en',
+                    template_id INTEGER REFERENCES email_templates(id),
+                    bcc_mode BOOLEAN DEFAULT 1,
+                    status VARCHAR(20) NOT NULL DEFAULT 'draft',
+                    created_by_id INTEGER NOT NULL REFERENCES employees(id),
+                    scheduled_at DATETIME,
+                    sent_at DATETIME,
+                    created_at DATETIME,
+                    updated_at DATETIME
+                )
+            """))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_campaigns_status ON campaigns(status)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_campaigns_created_by ON campaigns(created_by_id)"))
+            conn.commit()
+
+        if "campaign_recipients" not in tables_latest:
+            conn.execute(text("""
+                CREATE TABLE campaign_recipients (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    campaign_id INTEGER NOT NULL REFERENCES campaigns(id),
+                    contact_id INTEGER NOT NULL REFERENCES contacts(id),
+                    status VARCHAR(20) NOT NULL DEFAULT 'pending',
+                    sent_at DATETIME,
+                    error_message TEXT,
+                    created_at DATETIME,
+                    UNIQUE(campaign_id, contact_id)
+                )
+            """))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_campaign_recipients_campaign ON campaign_recipients(campaign_id)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_campaign_recipients_contact ON campaign_recipients(contact_id)"))
+            conn.commit()
+
+        # ── CampaignAttachment table ──────────────────────────────
+        tables_ca = [r[0] for r in conn.execute(text(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )).fetchall()]
+
+        if "campaign_attachments" not in tables_ca:
+            conn.execute(text("""
+                CREATE TABLE campaign_attachments (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    campaign_id INTEGER NOT NULL REFERENCES campaigns(id),
+                    original_filename VARCHAR(500) NOT NULL,
+                    display_name VARCHAR(500) NOT NULL,
+                    stored_filename VARCHAR(200) NOT NULL,
+                    content_type VARCHAR(100) NOT NULL,
+                    file_size_bytes INTEGER NOT NULL,
+                    uploaded_by_id INTEGER REFERENCES employees(id),
+                    is_active BOOLEAN DEFAULT 1,
+                    created_at DATETIME,
+                    updated_at DATETIME
+                )
+            """))
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_campaign_attachments_campaign "
+                "ON campaign_attachments(campaign_id)"
+            ))
+            conn.commit()
+
+        # ── Employee: must_change_password column ──────────────────────
+        emp_cols_pw = [r[1] for r in conn.execute(text("PRAGMA table_info(employees)")).fetchall()]
+        if "must_change_password" not in emp_cols_pw:
+            conn.execute(text(
+                "ALTER TABLE employees ADD COLUMN must_change_password BOOLEAN DEFAULT 0"
+            ))
+            conn.commit()
+
+        # ── Contact: bounced_at column ─────────────────────────────────
+        c_cols_bounce = [r[1] for r in conn.execute(text("PRAGMA table_info(contacts)")).fetchall()]
+        if "bounced_at" not in c_cols_bounce:
+            conn.execute(text(
+                "ALTER TABLE contacts ADD COLUMN bounced_at DATETIME"
+            ))
+            conn.commit()
+
+        # ── OutreachRecord: replied_at column ──────────────────────────
+        or_cols_reply = [r[1] for r in conn.execute(text("PRAGMA table_info(outreach_records)")).fetchall()]
+        if "replied_at" not in or_cols_reply:
+            conn.execute(text(
+                "ALTER TABLE outreach_records ADD COLUMN replied_at DATETIME"
+            ))
+            conn.commit()
+
+        # ── CampaignRecipient: consultant assignment columns ─────────
+        cr_cols = [r[1] for r in conn.execute(text("PRAGMA table_info(campaign_recipients)")).fetchall()]
+        if "assigned_consultant_id" not in cr_cols:
+            conn.execute(text(
+                "ALTER TABLE campaign_recipients ADD COLUMN assigned_consultant_id INTEGER REFERENCES employees(id)"
+            ))
+            conn.commit()
+        if "consultant_status" not in cr_cols:
+            conn.execute(text(
+                "ALTER TABLE campaign_recipients ADD COLUMN consultant_status VARCHAR(20)"
+            ))
+            conn.commit()
+        if "custom_email_subject" not in cr_cols:
+            conn.execute(text(
+                "ALTER TABLE campaign_recipients ADD COLUMN custom_email_subject VARCHAR(500)"
+            ))
+            conn.commit()
+        if "custom_email_body" not in cr_cols:
+            conn.execute(text(
+                "ALTER TABLE campaign_recipients ADD COLUMN custom_email_body TEXT"
+            ))
+            conn.commit()
+        if "consultant_accepted_at" not in cr_cols:
+            conn.execute(text(
+                "ALTER TABLE campaign_recipients ADD COLUMN consultant_accepted_at DATETIME"
+            ))
+            conn.commit()
+
+        # ── Notifications table ──────────────────────────────────────
+        tables_notif = [r[0] for r in conn.execute(text(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )).fetchall()]
+
+        if "notifications" not in tables_notif:
+            conn.execute(text("""
+                CREATE TABLE notifications (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    employee_id INTEGER NOT NULL REFERENCES employees(id),
+                    notification_type VARCHAR(50) NOT NULL,
+                    title VARCHAR(300) NOT NULL,
+                    message TEXT,
+                    link VARCHAR(500),
+                    reference_type VARCHAR(50),
+                    reference_id INTEGER,
+                    is_read BOOLEAN DEFAULT 0,
+                    created_at DATETIME
+                )
+            """))
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_notifications_employee "
+                "ON notifications(employee_id, is_read)"
+            ))
+            conn.commit()
+
+        # -- Contact: add expert_areas column if missing --------------------
+        c_cols_ea = [r[1] for r in conn.execute(text("PRAGMA table_info(contacts)")).fetchall()]
+        if "expert_areas" not in c_cols_ea:
+            conn.execute(text("ALTER TABLE contacts ADD COLUMN expert_areas TEXT"))
+            conn.commit()
+
+        # -- Contact: add is_decision_maker column if missing ---------------
+        if "is_decision_maker" not in c_cols_ea:
+            conn.execute(text(
+                "ALTER TABLE contacts ADD COLUMN is_decision_maker BOOLEAN DEFAULT 0"
+            ))
+            conn.commit()
+
+        # -- Contact: add opt_out_one_on_one column if missing ---------------
+        if "opt_out_one_on_one" not in c_cols_ea:
+            conn.execute(text(
+                "ALTER TABLE contacts ADD COLUMN opt_out_one_on_one BOOLEAN DEFAULT 0"
+            ))
+            conn.commit()
+
+        # -- Contact: add opt_out_marketing_info column if missing -----------
+        if "opt_out_marketing_info" not in c_cols_ea:
+            conn.execute(text(
+                "ALTER TABLE contacts ADD COLUMN opt_out_marketing_info BOOLEAN DEFAULT 0"
+            ))
+            conn.commit()
+
+        # -- OutreachRecord: add redirect tracking columns if missing ------
+        or_cols_redir = [r[1] for r in conn.execute(text("PRAGMA table_info(outreach_records)")).fetchall()]
+        if "redirected_from_id" not in or_cols_redir:
+            conn.execute(text(
+                "ALTER TABLE outreach_records ADD COLUMN redirected_from_id INTEGER REFERENCES outreach_records(id)"
+            ))
+            conn.commit()
+        if "redirected_by_id" not in or_cols_redir:
+            conn.execute(text(
+                "ALTER TABLE outreach_records ADD COLUMN redirected_by_id INTEGER REFERENCES employees(id)"
+            ))
+            conn.commit()
+
+        # -- Contact: add original_job_title column if missing -----------------
+        c_cols_ojt = [r[1] for r in conn.execute(text("PRAGMA table_info(contacts)")).fetchall()]
+        if "original_job_title" not in c_cols_ojt:
+            conn.execute(text(
+                "ALTER TABLE contacts ADD COLUMN original_job_title VARCHAR(300)"
+            ))
+            conn.commit()
+            # Backfill: set original_job_title to current job_title for existing rows
+            conn.execute(text(
+                "UPDATE contacts SET original_job_title = job_title WHERE original_job_title IS NULL AND job_title IS NOT NULL"
+            ))
+            conn.commit()
+
+        # -- ExpertiseTag table: create if missing ---------------------------------
+        tables = [r[0] for r in conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'")).fetchall()]
+        if "expertise_tags" not in tables:
+            conn.execute(text("""
+                CREATE TABLE expertise_tags (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name VARCHAR(200) NOT NULL UNIQUE,
+                    is_active BOOLEAN DEFAULT 1,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            """))
+            conn.commit()
+
+        # -- Contact: add relevance_tags column if missing ----------------------
+        c_cols_rt = [r[1] for r in conn.execute(text("PRAGMA table_info(contacts)")).fetchall()]
+        if "relevance_tags" not in c_cols_rt:
+            conn.execute(text("ALTER TABLE contacts ADD COLUMN relevance_tags TEXT"))
+            conn.commit()
+
+        # -- Employee: add relevance_tags column if missing ---------------------
+        emp_cols_rt = [r[1] for r in conn.execute(text("PRAGMA table_info(employees)")).fetchall()]
+        if "relevance_tags" not in emp_cols_rt:
+            conn.execute(text("ALTER TABLE employees ADD COLUMN relevance_tags TEXT"))
+            conn.commit()
+
+        # -- CampaignAnalysis table ---------------------------------------------
+        tables_ca2 = [r[0] for r in conn.execute(text(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )).fetchall()]
+        if "campaign_analyses" not in tables_ca2:
+            conn.execute(text("""
+                CREATE TABLE campaign_analyses (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    campaign_id INTEGER NOT NULL REFERENCES campaigns(id),
+                    attachment_id INTEGER REFERENCES campaign_attachments(id),
+                    extracted_themes TEXT,
+                    suggested_tags TEXT,
+                    status VARCHAR(20) NOT NULL DEFAULT 'pending',
+                    error_message TEXT,
+                    created_at DATETIME,
+                    completed_at DATETIME
+                )
+            """))
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_campaign_analyses_campaign "
+                "ON campaign_analyses(campaign_id)"
+            ))
+            conn.commit()
+
+        # -- CoverageGap table --------------------------------------------------
+        tables_cg = [r[0] for r in conn.execute(text(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )).fetchall()]
+        if "coverage_gaps" not in tables_cg:
+            conn.execute(text("""
+                CREATE TABLE coverage_gaps (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    company_name VARCHAR(400) NOT NULL,
+                    company_name_normalized VARCHAR(400) NOT NULL,
+                    industry VARCHAR(200),
+                    tier VARCHAR(50),
+                    contacts_in_crm INTEGER,
+                    critical_gap_count INTEGER DEFAULT 0,
+                    potential_gap_count INTEGER DEFAULT 0,
+                    total_gap_count INTEGER DEFAULT 0,
+                    missing_domains_critical TEXT,
+                    missing_titles_critical TEXT,
+                    missing_domains_potential TEXT,
+                    missing_titles_potential TEXT,
+                    upload_batch_id VARCHAR(100),
+                    created_at DATETIME
+                )
+            """))
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_coverage_gaps_normalized "
+                "ON coverage_gaps(company_name_normalized)"
+            ))
+            conn.commit()
+
+        # -- CampaignRecipient: add added_via column if missing ------------------
+        cr_cols2 = [r[1] for r in conn.execute(text("PRAGMA table_info(campaign_recipients)")).fetchall()]
+        if "added_via" not in cr_cols2:
+            conn.execute(text(
+                "ALTER TABLE campaign_recipients ADD COLUMN added_via VARCHAR(20)"
+            ))
+            conn.commit()
+
+        # -- Ensure relevance_tags column mapping exists for contacts -----------
+        existing_rt_map = conn.execute(text(
+            "SELECT 1 FROM column_mappings "
+            "WHERE file_type = 'contacts' AND logical_field = 'relevance_tags'"
+        )).fetchone()
+        if not existing_rt_map:
+            conn.execute(text(
+                "INSERT INTO column_mappings (file_type, logical_field, physical_column, is_required) "
+                "VALUES ('contacts', 'relevance_tags', 'RelevanceTags', 0)"
+            ))
+            conn.commit()
+
+        # -- Contact: add data_source and contact_created_by_id columns --------
+        c_cols_ds = [r[1] for r in conn.execute(text("PRAGMA table_info(contacts)")).fetchall()]
+        if "data_source" not in c_cols_ds:
+            conn.execute(text(
+                "ALTER TABLE contacts ADD COLUMN data_source VARCHAR(50) DEFAULT 'import'"
+            ))
+            conn.commit()
+        if "contact_created_by_id" not in c_cols_ds:
+            conn.execute(text(
+                "ALTER TABLE contacts ADD COLUMN contact_created_by_id INTEGER REFERENCES employees(id)"
             ))
             conn.commit()

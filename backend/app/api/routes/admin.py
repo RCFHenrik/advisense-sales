@@ -2,13 +2,14 @@ import json
 from io import BytesIO
 from pathlib import Path
 from typing import Optional, List
+from sqlalchemy import or_
 
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session, joinedload
 
 from app.core.database import get_db
-from app.core.auth import require_role
+from app.core.auth import require_role, get_current_user
 from app.models.models import (
     Employee, RoleEnum, BusinessArea, Team, Site, SystemConfig,
     ColumnMapping, AuditLog, SuppressionEntry, Contact, ContactStatusEnum,
@@ -16,12 +17,13 @@ from app.models.models import (
     Meeting, OutreachRecord, Negation, JobTitleDomain,
     ClassificationLookup, FileUpload,
     EmailTemplate, TemplateAttachment, HotTopic,
+    Campaign, CampaignRecipient, CampaignAttachment, CampaignStatusEnum,
 )
 from app.schemas.schemas import (
     BusinessAreaOut, BusinessAreaCreate, TeamOut, TeamCreate,
     SiteOut, SiteCreate, SystemConfigOut, SystemConfigUpdate,
     ColumnMappingOut, ColumnMappingCreate, ColumnMappingUpdate,
-    AuditLogOut, SiteLanguageOut, SiteLanguageCreate,
+    AuditLogOut, SiteLanguageOut, SiteLanguageCreate, SiteLanguageUpdate,
     ResetExecuteRequest,
 )
 
@@ -162,6 +164,25 @@ def create_site_language(
     return SiteLanguageOut.model_validate(sl)
 
 
+@router.put("/site-languages/{language_id}", response_model=SiteLanguageOut)
+def update_site_language(
+    language_id: int,
+    data: SiteLanguageUpdate,
+    db: Session = Depends(get_db),
+    current_user: Employee = Depends(require_role(RoleEnum.ADMIN, RoleEnum.BA_MANAGER)),
+):
+    sl = db.query(SiteLanguage).filter(SiteLanguage.id == language_id).first()
+    if not sl:
+        raise HTTPException(status_code=404, detail="Language not found")
+    if data.name is not None:
+        sl.name = data.name
+    if data.code is not None:
+        sl.code = data.code.strip() if data.code.strip() else None
+    db.commit()
+    db.refresh(sl)
+    return SiteLanguageOut.model_validate(sl)
+
+
 @router.delete("/site-languages/{language_id}")
 def delete_site_language(
     language_id: int,
@@ -247,6 +268,18 @@ def reset_column_mappings(
     return {"status": "reset", "file_type": file_type, "deleted": deleted}
 
 
+# ── FX Rates (accessible to all authenticated users) ─────────────────
+
+@router.get("/fx-rates")
+def get_fx_rates(
+    db: Session = Depends(get_db),
+    current_user: Employee = Depends(get_current_user),
+):
+    """Return FX rates as {currency_code: rate} dict. Accessible to all users."""
+    rates = db.query(SystemConfig).filter(SystemConfig.key.like("fx_rate_%")).all()
+    return {r.key.replace("fx_rate_", ""): float(r.value) for r in rates}
+
+
 # ── System Config ─────────────────────────────────────────────────────
 
 @router.get("/config", response_model=List[SystemConfigOut])
@@ -262,7 +295,7 @@ def update_config(
     key: str,
     data: SystemConfigUpdate,
     db: Session = Depends(get_db),
-    current_user: Employee = Depends(require_role(RoleEnum.ADMIN)),
+    current_user: Employee = Depends(require_role(RoleEnum.ADMIN, RoleEnum.BA_MANAGER)),
 ):
     config = db.query(SystemConfig).filter(SystemConfig.key == key).first()
     if not config:
@@ -283,6 +316,30 @@ def update_config(
     db.commit()
     db.refresh(config)
     return SystemConfigOut.model_validate(config)
+
+
+@router.delete("/config/{key}")
+def delete_config(
+    key: str,
+    db: Session = Depends(get_db),
+    current_user: Employee = Depends(require_role(RoleEnum.ADMIN, RoleEnum.BA_MANAGER)),
+):
+    """Delete a config entry. Only FX rate entries may be deleted for safety."""
+    config = db.query(SystemConfig).filter(SystemConfig.key == key).first()
+    if not config:
+        raise HTTPException(status_code=404, detail="Config entry not found")
+    if not key.startswith("fx_rate_"):
+        raise HTTPException(status_code=400, detail="Only FX rate entries may be deleted")
+    db.add(AuditLog(
+        employee_id=current_user.id,
+        action="delete_config",
+        entity_type="system_config",
+        entity_id=config.id,
+        old_value=config.value,
+    ))
+    db.delete(config)
+    db.commit()
+    return {"status": "deleted"}
 
 
 # ── Suppression List ──────────────────────────────────────────────────
@@ -384,6 +441,9 @@ def reset_preview(
         "meetings_count": db.query(Meeting).count(),
         "outreach_records_count": db.query(OutreachRecord).count(),
         "negations_count": db.query(Negation).count(),
+        "campaigns_count": db.query(Campaign).count(),
+        "campaign_recipients_count": db.query(CampaignRecipient).count(),
+        "campaign_attachments_count": db.query(CampaignAttachment).count(),
         "suppression_entries_count": db.query(SuppressionEntry).filter(
             SuppressionEntry.is_active == True
         ).count(),
@@ -511,8 +571,103 @@ def reset_backup(
                 "notes": n.get("notes"),
             })
 
+    # Gather campaign data
+    campaigns = (
+        db.query(Campaign)
+        .options(joinedload(Campaign.created_by))
+        .all()
+    )
+    campaign_data = []
+    for c in campaigns:
+        campaign_data.append({
+            "id": c.id,
+            "name": c.name,
+            "description": c.description,
+            "email_subject": c.email_subject,
+            "email_body": c.email_body,
+            "email_language": c.email_language.value if c.email_language else None,
+            "template_id": c.template_id,
+            "bcc_mode": c.bcc_mode,
+            "status": c.status.value if c.status else None,
+            "created_by_id": c.created_by_id,
+            "created_by_email": c.created_by.email if c.created_by else None,
+            "scheduled_at": c.scheduled_at.isoformat() if c.scheduled_at else None,
+            "sent_at": c.sent_at.isoformat() if c.sent_at else None,
+            "created_at": c.created_at.isoformat() if c.created_at else None,
+            "updated_at": c.updated_at.isoformat() if c.updated_at else None,
+        })
+
+    # Gather campaign recipients with contact context
+    campaign_recipients = (
+        db.query(CampaignRecipient)
+        .options(joinedload(CampaignRecipient.contact))
+        .all()
+    )
+    campaign_recipient_data = []
+    for cr in campaign_recipients:
+        campaign_recipient_data.append({
+            "id": cr.id,
+            "campaign_id": cr.campaign_id,
+            "contact_id": cr.contact_id,
+            "contact_email": cr.contact.email if cr.contact else None,
+            "contact_full_name": cr.contact.full_name if cr.contact else None,
+            "contact_company": cr.contact.company_name if cr.contact else None,
+            "status": cr.status.value if cr.status else None,
+            "sent_at": cr.sent_at.isoformat() if cr.sent_at else None,
+            "error_message": cr.error_message,
+            "created_at": cr.created_at.isoformat() if cr.created_at else None,
+        })
+
+    # Gather campaign attachment metadata
+    campaign_attachments = db.query(CampaignAttachment).filter(
+        CampaignAttachment.is_active == True
+    ).all()
+    campaign_attachment_data = []
+    for ca in campaign_attachments:
+        campaign_attachment_data.append({
+            "id": ca.id,
+            "campaign_id": ca.campaign_id,
+            "original_filename": ca.original_filename,
+            "display_name": ca.display_name,
+            "stored_filename": ca.stored_filename,
+            "content_type": ca.content_type,
+            "file_size_bytes": ca.file_size_bytes,
+        })
+
+    # Gather contact enrichments (expert_areas, is_decision_maker, name/email edits)
+    # These fields are manually curated and NOT available in CRM exports,
+    # so they must be preserved across resets.
+    # Also include contacts with audit-logged name/email changes
+    edited_contact_ids = [
+        r[0] for r in db.query(AuditLog.entity_id).filter(
+            AuditLog.entity_type == "contact",
+            AuditLog.action.in_(["update_contact_name", "update_contact_email"]),
+        ).distinct().all()
+    ]
+    enriched_contacts = db.query(Contact).filter(
+        or_(
+            Contact.expert_areas.isnot(None),
+            Contact.is_decision_maker == True,
+            Contact.original_job_title.isnot(None),
+            Contact.id.in_(edited_contact_ids) if edited_contact_ids else False,
+        )
+    ).all()
+    contact_enrichment_data = []
+    for ec in enriched_contacts:
+        contact_enrichment_data.append({
+            "contact_email": ec.email,
+            "contact_full_name": ec.full_name,
+            "contact_company": ec.company_name,
+            "first_name": ec.first_name,
+            "last_name": ec.last_name,
+            "expert_areas": ec.expert_areas,
+            "is_decision_maker": ec.is_decision_maker,
+            "job_title": ec.job_title,
+            "original_job_title": ec.original_job_title,
+        })
+
     backup = {
-        "backup_version": "1.0",
+        "backup_version": "1.4",
         "created_at": datetime.now(timezone.utc).isoformat(),
         "created_by": current_user.email,
         "summary": {
@@ -520,11 +675,19 @@ def reset_backup(
             "negations_count": len(negation_data),
             "suppression_entries_count": len(suppression_data),
             "blocked_contacts_count": len(blocked_contacts_data),
+            "campaigns_count": len(campaign_data),
+            "campaign_recipients_count": len(campaign_recipient_data),
+            "campaign_attachments_count": len(campaign_attachment_data),
+            "contact_enrichments_count": len(contact_enrichment_data),
         },
         "outreach_records": outreach_data,
         "negations": negation_data,
         "suppression_list": suppression_data,
         "blocked_contacts": blocked_contacts_data,
+        "campaigns": campaign_data,
+        "campaign_recipients": campaign_recipient_data,
+        "campaign_attachments": campaign_attachment_data,
+        "contact_enrichments": contact_enrichment_data,
     }
 
     json_bytes = json.dumps(backup, indent=2, ensure_ascii=False).encode("utf-8")
@@ -551,6 +714,9 @@ def reset_execute(
 
     try:
         # Delete in FK-safe order
+        campaign_attachments_deleted = db.query(CampaignAttachment).delete()
+        campaign_recipients_deleted = db.query(CampaignRecipient).delete()
+        campaigns_deleted = db.query(Campaign).delete()
         negations_deleted = db.query(Negation).delete()
         suppression_deleted = db.query(SuppressionEntry).delete()
         outreach_deleted = db.query(OutreachRecord).delete()
@@ -611,6 +777,16 @@ def reset_execute(
                     except OSError:
                         pass
 
+        # Clean campaign attachment files
+        ca_dir = Path(__file__).resolve().parent.parent.parent / "uploads" / "campaign-attachments"
+        if ca_dir.exists():
+            for f in ca_dir.iterdir():
+                if f.is_file():
+                    try:
+                        f.unlink()
+                    except OSError:
+                        pass
+
         # Audit log entry
         db.add(AuditLog(
             employee_id=current_user.id,
@@ -622,6 +798,9 @@ def reset_execute(
                 "meetings": meetings_deleted,
                 "outreach_records": outreach_deleted,
                 "negations": negations_deleted,
+                "campaigns": campaigns_deleted,
+                "campaign_recipients": campaign_recipients_deleted,
+                "campaign_attachments": campaign_attachments_deleted,
                 "suppression_entries": suppression_deleted,
                 "imported_consultants": consultants_deleted,
                 "jobtitle_domains": jobtitle_deleted,
@@ -643,6 +822,9 @@ def reset_execute(
             "meetings": meetings_deleted,
             "outreach_records": outreach_deleted,
             "negations": negations_deleted,
+            "campaigns": campaigns_deleted,
+            "campaign_recipients": campaign_recipients_deleted,
+            "campaign_attachments": campaign_attachments_deleted,
             "suppression_entries": suppression_deleted,
             "imported_consultants": consultants_deleted,
             "jobtitle_domains": jobtitle_deleted,
@@ -669,7 +851,7 @@ async def reset_restore(
     except (json.JSONDecodeError, UnicodeDecodeError) as e:
         raise HTTPException(status_code=400, detail=f"Invalid JSON file: {str(e)}")
 
-    if backup.get("backup_version") != "1.0":
+    if backup.get("backup_version") not in ("1.0", "1.1", "1.2", "1.3", "1.4"):
         raise HTTPException(
             status_code=400,
             detail=f"Unsupported backup version: {backup.get('backup_version')}",
@@ -757,6 +939,125 @@ async def reset_restore(
         contact.status = ContactStatusEnum.SUPPRESSED
         blocked_contacts_restored += 1
 
+    # 4. Restore campaigns and campaign recipients (v1.1+)
+    campaigns_restored = 0
+    campaign_recipients_restored = 0
+    for camp in backup.get("campaigns", []):
+        # Match creator by email
+        creator = None
+        if camp.get("created_by_email"):
+            creator = db.query(Employee).filter(
+                Employee.email == camp["created_by_email"]
+            ).first()
+
+        new_campaign = Campaign(
+            name=camp.get("name", "Restored Campaign"),
+            description=camp.get("description"),
+            email_subject=camp.get("email_subject", ""),
+            email_body=camp.get("email_body", ""),
+            email_language=camp.get("email_language", "en"),
+            template_id=None,  # template IDs may not match after reset
+            bcc_mode=camp.get("bcc_mode", True),
+            status=camp.get("status", "draft"),
+            created_by_id=creator.id if creator else current_user.id,
+        )
+        if camp.get("sent_at"):
+            from datetime import datetime as dt
+            try:
+                new_campaign.sent_at = dt.fromisoformat(camp["sent_at"])
+            except (ValueError, TypeError):
+                pass
+        db.add(new_campaign)
+        db.flush()  # get the new campaign ID
+
+        # Restore recipients for this campaign
+        old_campaign_id = camp.get("id")
+        for cr in backup.get("campaign_recipients", []):
+            if cr.get("campaign_id") != old_campaign_id:
+                continue
+            # Match contact by email
+            contact = None
+            if cr.get("contact_email"):
+                contact = db.query(Contact).filter(
+                    Contact.email.ilike(cr["contact_email"])
+                ).first()
+            if not contact:
+                warnings.append(
+                    f"Campaign recipient '{cr.get('contact_full_name')}' "
+                    f"({cr.get('contact_email')}) not found, skipped"
+                )
+                continue
+
+            # Check for duplicates
+            existing = db.query(CampaignRecipient).filter(
+                CampaignRecipient.campaign_id == new_campaign.id,
+                CampaignRecipient.contact_id == contact.id,
+            ).first()
+            if existing:
+                continue
+
+            new_cr = CampaignRecipient(
+                campaign_id=new_campaign.id,
+                contact_id=contact.id,
+                status=cr.get("status", "pending"),
+            )
+            if cr.get("sent_at"):
+                try:
+                    new_cr.sent_at = dt.fromisoformat(cr["sent_at"])
+                except (ValueError, TypeError):
+                    pass
+            new_cr.error_message = cr.get("error_message")
+            db.add(new_cr)
+            campaign_recipients_restored += 1
+
+        campaigns_restored += 1
+
+    # 5. Restore contact enrichments (expert_areas, is_decision_maker) — v1.2+
+    contact_enrichments_restored = 0
+    for entry in backup.get("contact_enrichments", []):
+        contact_email = entry.get("contact_email")
+        if not contact_email:
+            continue
+
+        contact = db.query(Contact).filter(Contact.email.ilike(contact_email)).first()
+        if not contact:
+            warnings.append(
+                f"Enrichment for '{entry.get('contact_full_name')}' ({contact_email}) "
+                f"not found in current contacts, skipped"
+            )
+            continue
+
+        updated = False
+        if entry.get("expert_areas") and not contact.expert_areas:
+            contact.expert_areas = entry["expert_areas"]
+            updated = True
+        if entry.get("is_decision_maker") and not contact.is_decision_maker:
+            contact.is_decision_maker = True
+            updated = True
+        # Restore edited job titles
+        if entry.get("original_job_title"):
+            contact.original_job_title = entry["original_job_title"]
+            if entry.get("job_title") and entry["job_title"] != entry["original_job_title"]:
+                contact.job_title = entry["job_title"]
+            updated = True
+
+        # Restore name edits (v1.4+)
+        if entry.get("first_name") and entry["first_name"] != contact.first_name:
+            contact.first_name = entry["first_name"]
+            updated = True
+        if entry.get("last_name") and entry["last_name"] != contact.last_name:
+            contact.last_name = entry["last_name"]
+            updated = True
+        # Recompute full_name if name parts were restored
+        if entry.get("first_name") or entry.get("last_name"):
+            parts = [contact.first_name or "", contact.last_name or ""]
+            computed = " ".join(p for p in parts if p).strip()
+            if computed:
+                contact.full_name = computed
+
+        if updated:
+            contact_enrichments_restored += 1
+
     # Audit log
     db.add(AuditLog(
         employee_id=current_user.id,
@@ -769,6 +1070,9 @@ async def reset_restore(
             "suppression_restored": suppression_restored,
             "contacts_flagged": contacts_flagged,
             "blocked_contacts_restored": blocked_contacts_restored,
+            "campaigns_restored": campaigns_restored,
+            "campaign_recipients_restored": campaign_recipients_restored,
+            "contact_enrichments_restored": contact_enrichments_restored,
             "warnings_count": len(warnings),
         }),
     ))
@@ -779,5 +1083,8 @@ async def reset_restore(
         "suppression_restored": suppression_restored,
         "contacts_flagged": contacts_flagged,
         "blocked_contacts_restored": blocked_contacts_restored,
+        "campaigns_restored": campaigns_restored,
+        "campaign_recipients_restored": campaign_recipients_restored,
+        "contact_enrichments_restored": contact_enrichments_restored,
         "warnings": warnings,
     }

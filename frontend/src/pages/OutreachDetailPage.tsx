@@ -1,9 +1,12 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
+import { AlertTriangle, MessageSquareReply } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import api from '../api/client';
-import type { OutreachRecord, NegationReason, Language, EmailTemplate, Contact, TemplateAttachment } from '../types';
-import { formatDateTime } from '../utils/dateFormat';
+import type { OutreachRecord, NegationReason, Language, EmailTemplate, Contact, Employee, TemplateAttachment, ContactHistory, MeetingHistoryItem, OutreachHistoryItem, CampaignHistoryItem } from '../types';
+import { formatDate, formatDateTime } from '../utils/dateFormat';
+import { getCurrencyForCountry, formatRevenue } from '../utils/currency';
+import SearchableSelect from '../components/SearchableSelect';
 
 const NEGATION_REASONS: { value: NegationReason; label: string }[] = [
   { value: 'wrong_person', label: 'Wrong person (left company / changed role)' },
@@ -42,11 +45,14 @@ const fmtFileSize = (bytes: number) => {
 export default function OutreachDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const { user } = useAuth();
+  const { user, fxRates } = useAuth();
+  const currency = useMemo(() => getCurrencyForCountry(user?.site_country_code), [user?.site_country_code]);
   const [record, setRecord] = useState<OutreachRecord | null>(null);
   const [showNegate, setShowNegate] = useState(false);
   const [negReason, setNegReason] = useState<NegationReason>('wrong_person');
   const [negNotes, setNegNotes] = useState('');
+  const [redirectToId, setRedirectToId] = useState<number | null>(null);
+  const [consultantOptions, setConsultantOptions] = useState<{ value: number; label: string }[]>([]);
   const [showOutcome, setShowOutcome] = useState(false);
   const [outcome, setOutcome] = useState('replied');
   const [outcomeNotes, setOutcomeNotes] = useState('');
@@ -57,28 +63,54 @@ export default function OutreachDetailPage() {
   const [availableTemplates, setAvailableTemplates] = useState<EmailTemplate[]>([]);
   const [selectedTemplateId, setSelectedTemplateId] = useState<number | null>(null);
   const [contactDetail, setContactDetail] = useState<Contact | null>(null);
-  const [meetingParticipants, setMeetingParticipants] = useState<
-    { employee_name: string; meeting_count: number }[]
-  >([]);
+  const [contactHistory, setContactHistory] = useState<ContactHistory | null>(null);
 
   // Attachment state
   const [templateAttachments, setTemplateAttachments] = useState<TemplateAttachment[]>([]);
   const [selectedAttachmentIds, setSelectedAttachmentIds] = useState<number[]>([]);
 
+  // Reply registration state
+  const [showReplyModal, setShowReplyModal] = useState(false);
+  const [replyNotes, setReplyNotes] = useState('');
+  const [replySubmitting, setReplySubmitting] = useState(false);
+
   useEffect(() => {
     fetchRecord();
   }, [id]);
 
-  // Fetch contact detail and meeting participants when the record loads
+  // Fetch contact detail and activity history when the record loads
   useEffect(() => {
     if (!record?.contact_id) return;
     api.get(`/contacts/${record.contact_id}`)
       .then((r) => setContactDetail(r.data))
       .catch(() => {});
-    api.get(`/contacts/${record.contact_id}/meeting-participants`)
-      .then((r) => setMeetingParticipants(r.data))
+    api.get(`/contacts/${record.contact_id}/history`)
+      .then((r) => setContactHistory(r.data))
       .catch(() => {});
   }, [record?.contact_id]);
+
+  // Merge meetings + outreach into a unified timeline sorted by date descending, capped at 3
+  interface ActivityTimelineItem {
+    type: 'meeting' | 'outreach';
+    date: string | null;
+    data: MeetingHistoryItem | OutreachHistoryItem;
+  }
+  const activityTimeline: ActivityTimelineItem[] = useMemo(() => {
+    if (!contactHistory) return [];
+    const items: ActivityTimelineItem[] = [];
+    for (const m of contactHistory.meetings) {
+      items.push({ type: 'meeting', date: m.activity_date, data: m });
+    }
+    for (const o of contactHistory.outreach) {
+      items.push({ type: 'outreach', date: o.sent_at || o.created_at, data: o });
+    }
+    items.sort((a, b) => {
+      const da = a.date ? new Date(a.date).getTime() : 0;
+      const db = b.date ? new Date(b.date).getTime() : 0;
+      return db - da;
+    });
+    return items.slice(0, 3);
+  }, [contactHistory]);
 
   // Fetch available templates whenever the selected language changes
   useEffect(() => {
@@ -123,10 +155,38 @@ export default function OutreachDetailPage() {
     fetchRecord();
   };
 
+  // Fetch consultant list when reason is another_consultant_better
+  useEffect(() => {
+    if (negReason !== 'another_consultant_better') {
+      setConsultantOptions([]);
+      setRedirectToId(null);
+      return;
+    }
+    api.get('/employees/redirect-targets')
+      .then((res) => {
+        const opts = res.data
+          .filter((e: any) => e.id !== record?.employee_id)
+          .map((e: any) => ({
+            value: e.id,
+            label: `${e.name} — ${e.team_name || 'No team'} (${e.business_area_name || 'No BA'})`,
+          }));
+        setConsultantOptions(opts);
+      })
+      .catch(() => setConsultantOptions([]));
+  }, [negReason, record?.employee_id]);
+
   const handleNegate = async () => {
-    await api.post(`/outreach/${id}/negate`, { reason: negReason, notes: negNotes });
+    const payload: Record<string, unknown> = { reason: negReason, notes: negNotes };
+    if (negReason === 'another_consultant_better' && redirectToId) {
+      payload.redirect_to_employee_id = redirectToId;
+    }
+    const res = await api.post(`/outreach/${id}/negate`, payload);
     setShowNegate(false);
-    fetchRecord();
+    if (res.data.redirected_outreach_id) {
+      navigate(`/outreach/${res.data.redirected_outreach_id}`);
+    } else {
+      fetchRecord();
+    }
   };
 
   const handleGenerateEmail = async () => {
@@ -193,6 +253,20 @@ export default function OutreachDetailPage() {
     fetchRecord();
   };
 
+  const handleRegisterReply = async () => {
+    setReplySubmitting(true);
+    try {
+      await api.post(`/outreach/${id}/register-reply`, { notes: replyNotes || null });
+      setShowReplyModal(false);
+      setReplyNotes('');
+      fetchRecord();
+    } catch (err: any) {
+      alert(err.response?.data?.detail || 'Failed to register reply');
+    } finally {
+      setReplySubmitting(false);
+    }
+  };
+
   const toggleAttachment = (attId: number) => {
     setSelectedAttachmentIds((prev) =>
       prev.includes(attId) ? prev.filter((x) => x !== attId) : [...prev, attId]
@@ -226,6 +300,74 @@ export default function OutreachDetailPage() {
         </p>
       </div>
 
+      {/* Bounce warning banner */}
+      {contactDetail?.bounced_at && (
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 10,
+            background: '#fffbeb',
+            border: '1px solid #f6ad55',
+            borderRadius: 8,
+            padding: '10px 16px',
+            marginBottom: 16,
+            color: '#c05621',
+            fontSize: 14,
+          }}
+        >
+          <AlertTriangle size={20} color="#dd6b20" />
+          <span>
+            <strong>Bounced:</strong> This contact's email bounced on{' '}
+            {formatDate(contactDetail.bounced_at)}. Please update the contact in HubSpot.
+          </span>
+        </div>
+      )}
+
+      {/* Register Reply button — prominent for SENT/PREPARED outreach */}
+      {record.status === 'sent' || record.status === 'prepared' ? (
+        <div style={{ marginBottom: 16 }}>
+          <button
+            className="btn btn-primary"
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 8,
+              padding: '10px 20px',
+              fontSize: 15,
+              fontWeight: 600,
+              background: 'var(--accent)',
+              borderColor: 'var(--accent)',
+            }}
+            onClick={() => setShowReplyModal(true)}
+          >
+            <MessageSquareReply size={18} />
+            Register Reply
+          </button>
+        </div>
+      ) : null}
+
+      {/* Reply received indicator */}
+      {record.status === 'replied' && record.replied_at && (
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            color: 'var(--accent)',
+            fontSize: 14,
+            fontWeight: 500,
+            marginBottom: 16,
+          }}
+        >
+          <MessageSquareReply size={18} />
+          Reply received on {formatDate(record.replied_at)}
+          {record.outcome_notes && (
+            <span style={{ color: '#718096', fontWeight: 400 }}> — {record.outcome_notes}</span>
+          )}
+        </div>
+      )}
+
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 16 }}>
         <div className="card">
           <div className="card-header">Contact Details</div>
@@ -237,12 +379,16 @@ export default function OutreachDetailPage() {
               {contactDetail?.responsibility_domain && (
                 <><dt style={{ color: '#718096' }}>Domain:</dt><dd>{contactDetail.responsibility_domain}</dd></>
               )}
+
+              {contactDetail?.is_decision_maker && (
+                <><dt style={{ color: '#718096' }}>Decision Maker:</dt><dd style={{ color: '#d69e2e', fontWeight: 600 }}>Yes</dd></>
+              )}
               <dt style={{ color: '#718096' }}>Days Since Interaction:</dt>
               <dd>{contactDetail?.days_since_interaction != null ? `${contactDetail.days_since_interaction} days` : '—'}</dd>
               <dt style={{ color: '#718096' }}>Total Historical Revenue:</dt>
               <dd>
                 {contactDetail?.revenue != null
-                  ? new Intl.NumberFormat('en-US', { style: 'currency', currency: 'EUR', maximumFractionDigits: 0 }).format(contactDetail.revenue)
+                  ? formatRevenue(contactDetail.revenue, currency, fxRates)
                   : contactDetail?.has_historical_revenue ? 'Yes (amount undisclosed)' : '—'}
               </dd>
             </dl>
@@ -256,43 +402,169 @@ export default function OutreachDetailPage() {
               <dt style={{ color: '#718096' }}>Consultant:</dt><dd>{record.employee_name}</dd>
               <dt style={{ color: '#718096' }}>Score:</dt><dd>{record.recommendation_score?.toFixed(0) || '—'}</dd>
               <dt style={{ color: '#718096' }}>Reason:</dt><dd style={{ fontSize: 13 }}>{record.recommendation_reason || '—'}</dd>
+              {record.redirected_from_id && record.redirected_by_name && (
+                <>
+                  <dt style={{ color: '#718096' }}>Redirected by:</dt>
+                  <dd style={{ fontSize: 13 }}>
+                    <span
+                      title={record.redirect_notes || 'No documented reason'}
+                      style={{ cursor: 'help', borderBottom: '1px dotted #a0aec0' }}
+                    >
+                      {record.redirected_by_name} on {formatDate(record.redirected_at || record.created_at)}
+                    </span>
+                  </dd>
+                </>
+              )}
             </dl>
           </div>
         </div>
       </div>
 
-      {/* Previous meetings with this contact */}
-      {meetingParticipants.length > 0 && (
-        <div className="card" style={{ marginBottom: 16 }}>
-          <div className="card-header">Previous Meetings With This Contact</div>
-          <div className="card-body">
-            <table style={{ width: '100%', fontSize: 13 }}>
-              <thead>
-                <tr>
-                  <th style={{ textAlign: 'left', paddingBottom: 6 }}>Consultant</th>
-                  <th style={{ textAlign: 'right', paddingBottom: 6 }}>Meetings</th>
-                </tr>
-              </thead>
-              <tbody>
-                {meetingParticipants.map((p) => (
-                  <tr key={p.employee_name}>
-                    <td style={{ paddingTop: 4 }}>{p.employee_name}</td>
-                    <td style={{ textAlign: 'right', paddingTop: 4 }}>{p.meeting_count}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
-
-      {/* Actions based on status */}
+      {/* Actions based on status — placed before activity history */}
       {record.status === 'proposed' && (
         <div className="card" style={{ marginBottom: 16 }}>
           <div className="card-header">Action Required</div>
           <div className="card-body" style={{ display: 'flex', gap: 12 }}>
             <button className="btn btn-primary" onClick={handleAccept}>Accept Proposal</button>
             <button className="btn btn-danger" onClick={() => setShowNegate(true)}>Negate</button>
+          </div>
+        </div>
+      )}
+
+      {/* Contact Activity History — up to 3 recent activities */}
+      <div className="card" style={{ marginBottom: 16 }}>
+        <div className="card-header">Contact Activity History</div>
+        <div className="card-body">
+          {activityTimeline.length === 0 ? (
+            <p style={{ color: '#718096', fontSize: 13, textAlign: 'center', padding: 16 }}>
+              No information available
+            </p>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              {activityTimeline.map((item) =>
+                item.type === 'meeting' ? (
+                  <div
+                    key={`m-${(item.data as MeetingHistoryItem).id}`}
+                    style={{
+                      background: '#f7fafc',
+                      borderRadius: 8,
+                      padding: 14,
+                      borderLeft: '3px solid #48bb78',
+                    }}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+                      <span style={{ fontWeight: 600, fontSize: 13 }}>Meeting</span>
+                      <span style={{ fontSize: 12, color: '#718096' }}>
+                        {formatDate((item.data as MeetingHistoryItem).activity_date)}
+                      </span>
+                    </div>
+                    <div style={{ fontSize: 13, marginBottom: 4 }}>
+                      <span style={{ color: '#718096' }}>Registrator:</span>{' '}
+                      {(item.data as MeetingHistoryItem).employee_name || 'Unknown'}
+                    </div>
+                    {(item.data as MeetingHistoryItem).details && (
+                      <div style={{ fontSize: 13, color: '#4a5568', marginTop: 4 }}>
+                        <span style={{ color: '#718096' }}>Notes:</span>{' '}
+                        {(item.data as MeetingHistoryItem).details!.length > 200
+                          ? (item.data as MeetingHistoryItem).details!.substring(0, 200) + '...'
+                          : (item.data as MeetingHistoryItem).details}
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div
+                    key={`o-${(item.data as OutreachHistoryItem).id}`}
+                    style={{
+                      background: '#ebf8ff',
+                      borderRadius: 8,
+                      padding: 14,
+                      borderLeft: '3px solid #3182ce',
+                    }}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+                      <span style={{ fontWeight: 600, fontSize: 13 }}>Email Outreach</span>
+                      <span style={{ fontSize: 12, color: '#718096' }}>
+                        {formatDate((item.data as OutreachHistoryItem).sent_at || (item.data as OutreachHistoryItem).created_at)}
+                      </span>
+                    </div>
+                    <div style={{ fontSize: 13, marginBottom: 4 }}>
+                      <span style={{ color: '#718096' }}>Sent by:</span>{' '}
+                      {(item.data as OutreachHistoryItem).employee_name || 'Unknown'}
+                    </div>
+                    {(item.data as OutreachHistoryItem).email_subject && (
+                      <div style={{ fontSize: 13, marginBottom: 4 }}>
+                        <span style={{ color: '#718096' }}>Subject:</span>{' '}
+                        {(item.data as OutreachHistoryItem).email_subject}
+                      </div>
+                    )}
+                    {(item.data as OutreachHistoryItem).template_name && (
+                      <div style={{ fontSize: 13, marginBottom: 4 }}>
+                        <span style={{ color: '#718096' }}>Template:</span>{' '}
+                        {(item.data as OutreachHistoryItem).template_name}
+                      </div>
+                    )}
+                    <div style={{ fontSize: 12, marginTop: 4, display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <span className={`badge badge-${(item.data as OutreachHistoryItem).status}`}>
+                        {(item.data as OutreachHistoryItem).status.replace(/_/g, ' ')}
+                      </span>
+                      {(item.data as OutreachHistoryItem).replied_at && (
+                        <span style={{ color: 'var(--accent)', fontSize: 12 }}>
+                          Reply received {formatDate((item.data as OutreachHistoryItem).replied_at!)}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                )
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Contact Campaign History */}
+      {contactHistory && contactHistory.campaigns && contactHistory.campaigns.length > 0 && (
+        <div className="card" style={{ marginBottom: 16 }}>
+          <div className="card-header">Contact Campaign History</div>
+          <div className="card-body">
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              {contactHistory.campaigns.map((c: CampaignHistoryItem) => (
+                <div
+                  key={`c-${c.id}`}
+                  style={{
+                    background: '#f5f0ff',
+                    borderRadius: 8,
+                    padding: 14,
+                    borderLeft: '3px solid #805ad5',
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+                    <span style={{ fontWeight: 600, fontSize: 13 }}>Campaign</span>
+                    <span style={{ fontSize: 12, color: '#718096' }}>
+                      {formatDate(c.sent_at)}
+                    </span>
+                  </div>
+                  <div style={{ fontSize: 13, marginBottom: 4 }}>
+                    <span style={{ color: '#718096' }}>Name:</span>{' '}
+                    {c.campaign_name || 'Unnamed'}
+                  </div>
+                  {c.email_subject && (
+                    <div style={{ fontSize: 13, marginBottom: 4 }}>
+                      <span style={{ color: '#718096' }}>Subject:</span>{' '}
+                      {c.email_subject}
+                    </div>
+                  )}
+                  {c.created_by_name && (
+                    <div style={{ fontSize: 13, marginBottom: 4 }}>
+                      <span style={{ color: '#718096' }}>Created by:</span>{' '}
+                      {c.created_by_name}
+                    </div>
+                  )}
+                  <div style={{ fontSize: 12, marginTop: 4 }}>
+                    <span className="badge badge-sent">{c.status.replace(/_/g, ' ')}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
           </div>
         </div>
       )}
@@ -500,6 +772,21 @@ export default function OutreachDetailPage() {
                   placeholder="Additional context..."
                 />
               </div>
+              {negReason === 'another_consultant_better' && (
+                <div className="form-group">
+                  <label>Redirect to consultant (required)</label>
+                  <SearchableSelect
+                    options={consultantOptions}
+                    placeholder="Search consultant by name..."
+                    onSelect={(val) => setRedirectToId(val)}
+                  />
+                  {redirectToId && (
+                    <div style={{ fontSize: 12, color: 'var(--accent)', marginTop: 4 }}>
+                      Selected: {consultantOptions.find(o => o.value === redirectToId)?.label}
+                    </div>
+                  )}
+                </div>
+              )}
               {negReason === 'do_not_contact' && (
                 <div style={{ padding: 12, background: '#fff5f5', borderRadius: 6, marginBottom: 12, fontSize: 13 }}>
                   This will add the contact to the suppression list. All future outreach will be blocked.
@@ -508,7 +795,11 @@ export default function OutreachDetailPage() {
             </div>
             <div className="modal-footer">
               <button className="btn btn-outline" onClick={() => setShowNegate(false)}>Cancel</button>
-              <button className="btn btn-danger" onClick={handleNegate}>Confirm Negation</button>
+              <button
+                className="btn btn-danger"
+                onClick={handleNegate}
+                disabled={negReason === 'another_consultant_better' && !redirectToId}
+              >Confirm Negation</button>
             </div>
           </div>
         </div>
@@ -544,6 +835,47 @@ export default function OutreachDetailPage() {
             <div className="modal-footer">
               <button className="btn btn-outline" onClick={() => setShowOutcome(false)}>Cancel</button>
               <button className="btn btn-primary" onClick={handleOutcome}>Save Outcome</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Reply registration modal */}
+      {showReplyModal && (
+        <div className="modal-overlay" onClick={() => setShowReplyModal(false)}>
+          <div className="modal" style={{ maxWidth: 440 }} onClick={(ev) => ev.stopPropagation()}>
+            <div className="modal-header" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <MessageSquareReply size={18} />
+              Register Reply
+            </div>
+            <div className="modal-body">
+              <p style={{ color: '#4a5568', marginBottom: 12 }}>
+                Register that <strong>{record?.contact_name}</strong> replied to this outreach.
+                This will update the outreach status and record the reply date.
+              </p>
+              <div className="form-group">
+                <label>Notes (optional)</label>
+                <textarea
+                  className="form-control"
+                  rows={3}
+                  value={replyNotes}
+                  onChange={(e) => setReplyNotes(e.target.value)}
+                  placeholder="Any details about the reply..."
+                />
+              </div>
+            </div>
+            <div className="modal-footer">
+              <button className="btn btn-outline" onClick={() => setShowReplyModal(false)} disabled={replySubmitting}>
+                Cancel
+              </button>
+              <button
+                className="btn btn-primary"
+                style={{ background: 'var(--accent)', borderColor: 'var(--accent)' }}
+                onClick={handleRegisterReply}
+                disabled={replySubmitting}
+              >
+                {replySubmitting ? 'Registering...' : 'Confirm Reply'}
+              </button>
             </div>
           </div>
         </div>

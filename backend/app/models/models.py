@@ -70,6 +70,21 @@ class ApprovalStatusEnum(str, enum.Enum):
     REJECTED = "rejected"
 
 
+class CampaignStatusEnum(str, enum.Enum):
+    DRAFT = "draft"
+    READY = "ready"
+    SENDING = "sending"
+    SENT = "sent"
+    CANCELLED = "cancelled"
+
+
+class CampaignRecipientStatusEnum(str, enum.Enum):
+    PENDING = "pending"
+    SENT = "sent"
+    FAILED = "failed"
+    BOUNCED = "bounced"
+
+
 # ── Organisational tables ──────────────────────────────────────────────
 
 class BusinessArea(Base):
@@ -156,13 +171,16 @@ class Employee(Base):
     seniority = Column(String(50), nullable=True)
     primary_language = Column(Enum(LanguageEnum), default=LanguageEnum.ENGLISH)
     domain_expertise_tags = Column(Text, nullable=True)  # JSON array stored as text
+    relevance_tags = Column(Text, nullable=True)  # JSON array for consultant relevance tags
     outreach_target_per_week = Column(Integer, default=3)
     outreach_target_per_month = Column(Integer, nullable=True, default=None)
     is_active = Column(Boolean, default=True)
     approval_status = Column(String(20), nullable=False, default="approved")
     uploaded_batch_id = Column(String(100), nullable=True)
     password_hash = Column(String(300), nullable=True)  # For mock auth
+    must_change_password = Column(Boolean, default=False)
     profile_description = Column(Text, nullable=True)
+    can_campaign = Column(Boolean, default=False)
     created_at = Column(DateTime, default=utcnow)
     updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
 
@@ -186,6 +204,7 @@ class Contact(Base):
     full_name = Column(String(400), nullable=True)
     email = Column(String(300), nullable=True, index=True)
     job_title = Column(String(300), nullable=True)
+    original_job_title = Column(String(300), nullable=True)
     company_name = Column(String(400), nullable=True)  # ClientGroup (group-level entity)
     client_name = Column(String(400), nullable=True)    # ClientName (specific subsidiary)
     associated_company_id = Column(String(100), nullable=True)
@@ -210,11 +229,20 @@ class Contact(Base):
     pinned_by_id = Column(Integer, ForeignKey("employees.id"), nullable=True)
     hubspot_import_batch = Column(String(100), nullable=True)
     stop_flag_cleared_at = Column(DateTime, nullable=True)
+    bounced_at = Column(DateTime, nullable=True)
+    expert_areas = Column(Text, nullable=True)          # JSON array, e.g. '["IFRS 9","Basel IV"]'
+    relevance_tags = Column(Text, nullable=True)        # JSON array, e.g. '["Public Sector","Audit","Nordics"]'
+    is_decision_maker = Column(Boolean, default=False)   # Key decision-maker flag
+    opt_out_one_on_one = Column(Boolean, default=False)  # Opted out of direct/personal emails
+    opt_out_marketing_info = Column(Boolean, default=False)  # Opted out of marketing emails
+    data_source = Column(String(50), default="import")       # "import" or "app_created"
+    contact_created_by_id = Column(Integer, ForeignKey("employees.id"), nullable=True)
     created_at = Column(DateTime, default=utcnow)
     updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
 
     outreach_records = relationship("OutreachRecord", back_populates="contact")
     meetings = relationship("Meeting", back_populates="contact")
+    contact_created_by = relationship("Employee", foreign_keys=[contact_created_by_id])
 
     __table_args__ = (
         Index("ix_contacts_dedup", "email", "associated_company_id", "full_name"),
@@ -278,6 +306,7 @@ class OutreachRecord(Base):
     # Tracking
     message_id = Column(String(500), nullable=True)  # Outlook message ID
     sent_at = Column(DateTime, nullable=True)
+    replied_at = Column(DateTime, nullable=True)
     outcome = Column(String(200), nullable=True)
     outcome_notes = Column(Text, nullable=True)
 
@@ -289,6 +318,10 @@ class OutreachRecord(Base):
     recommendation_score = Column(Float, nullable=True)
     recommendation_reason = Column(Text, nullable=True)
 
+    # Redirect tracking
+    redirected_from_id = Column(Integer, ForeignKey("outreach_records.id"), nullable=True)
+    redirected_by_id = Column(Integer, ForeignKey("employees.id"), nullable=True)
+
     created_at = Column(DateTime, default=utcnow)
     updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
 
@@ -296,6 +329,8 @@ class OutreachRecord(Base):
     employee = relationship("Employee", back_populates="outreach_records", foreign_keys=[employee_id])
     template = relationship("EmailTemplate")
     negation = relationship("Negation", back_populates="outreach_record", uselist=False)
+    redirected_from = relationship("OutreachRecord", remote_side="OutreachRecord.id", foreign_keys=[redirected_from_id], uselist=False)
+    redirected_by = relationship("Employee", foreign_keys=[redirected_by_id])
 
     __table_args__ = (
         Index("ix_outreach_status", "status"),
@@ -444,6 +479,17 @@ class SystemConfig(Base):
     updated_by_id = Column(Integer, ForeignKey("employees.id"), nullable=True)
 
 
+# ── Expertise Tags ────────────────────────────────────────────────────
+
+class ExpertiseTag(Base):
+    __tablename__ = "expertise_tags"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(200), nullable=False, unique=True)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=utcnow)
+
+
 # ── Audit Log ─────────────────────────────────────────────────────────
 
 class AuditLog(Base):
@@ -537,3 +583,178 @@ class ClassificationLookup(Base):
     __table_args__ = (
         Index("ix_classification_lookup", "job_title", "client_group_domicile", "client_tier", "client_industry"),
     )
+
+
+# ── Campaign Outreach ────────────────────────────────────────────────
+
+class Campaign(Base):
+    __tablename__ = "campaigns"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(300), nullable=False)
+    description = Column(Text, nullable=True)
+
+    # Email content
+    email_subject = Column(String(500), nullable=False, default="")
+    email_body = Column(Text, nullable=False, default="")
+    email_language = Column(Enum(LanguageEnum), nullable=False, default=LanguageEnum.ENGLISH)
+    template_id = Column(Integer, ForeignKey("email_templates.id"), nullable=True)
+
+    # Delivery settings
+    bcc_mode = Column(Boolean, default=True)  # True = anonymized (BCC)
+
+    # Status
+    status = Column(Enum(CampaignStatusEnum), nullable=False, default=CampaignStatusEnum.DRAFT)
+
+    # Ownership
+    created_by_id = Column(Integer, ForeignKey("employees.id"), nullable=False)
+
+    # Timestamps
+    scheduled_at = Column(DateTime, nullable=True)
+    sent_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=utcnow)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
+
+    # Relationships
+    created_by = relationship("Employee")
+    template = relationship("EmailTemplate")
+    recipients = relationship("CampaignRecipient", back_populates="campaign", lazy="selectin")
+    attachments = relationship("CampaignAttachment", back_populates="campaign", lazy="selectin")
+
+    __table_args__ = (
+        Index("ix_campaigns_status", "status"),
+        Index("ix_campaigns_created_by", "created_by_id"),
+    )
+
+
+class CampaignRecipient(Base):
+    __tablename__ = "campaign_recipients"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    campaign_id = Column(Integer, ForeignKey("campaigns.id"), nullable=False)
+    contact_id = Column(Integer, ForeignKey("contacts.id"), nullable=False)
+
+    # Per-recipient status
+    status = Column(Enum(CampaignRecipientStatusEnum), nullable=False,
+                    default=CampaignRecipientStatusEnum.PENDING)
+    sent_at = Column(DateTime, nullable=True)
+    error_message = Column(Text, nullable=True)
+
+    # Consultant assignment
+    assigned_consultant_id = Column(Integer, ForeignKey("employees.id"), nullable=True)
+    consultant_status = Column(String(20), nullable=True)  # NULL=marketing, pending, accepted
+    custom_email_subject = Column(String(500), nullable=True)
+    custom_email_body = Column(Text, nullable=True)
+    consultant_accepted_at = Column(DateTime, nullable=True)
+
+    # How the contact was added: "filter", "individual"
+    added_via = Column(String(20), nullable=True)
+
+    created_at = Column(DateTime, default=utcnow)
+
+    # Relationships
+    campaign = relationship("Campaign", back_populates="recipients")
+    contact = relationship("Contact")
+    assigned_consultant = relationship("Employee", foreign_keys=[assigned_consultant_id])
+
+    __table_args__ = (
+        UniqueConstraint("campaign_id", "contact_id"),
+        Index("ix_campaign_recipients_campaign", "campaign_id"),
+        Index("ix_campaign_recipients_contact", "contact_id"),
+    )
+
+
+class CampaignAttachment(Base):
+    __tablename__ = "campaign_attachments"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    campaign_id = Column(Integer, ForeignKey("campaigns.id"), nullable=False)
+    original_filename = Column(String(500), nullable=False)
+    display_name = Column(String(500), nullable=False)
+    stored_filename = Column(String(200), nullable=False)
+    content_type = Column(String(100), nullable=False)
+    file_size_bytes = Column(Integer, nullable=False)
+    uploaded_by_id = Column(Integer, ForeignKey("employees.id"), nullable=True)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=utcnow)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
+
+    # Relationships
+    campaign = relationship("Campaign", back_populates="attachments")
+
+    __table_args__ = (
+        Index("ix_campaign_attachments_campaign", "campaign_id"),
+    )
+
+
+# ── Notifications ────────────────────────────────────────────────────
+
+class Notification(Base):
+    __tablename__ = "notifications"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    employee_id = Column(Integer, ForeignKey("employees.id"), nullable=False)
+    notification_type = Column(String(50), nullable=False)
+    title = Column(String(300), nullable=False)
+    message = Column(Text, nullable=True)
+    link = Column(String(500), nullable=True)
+    reference_type = Column(String(50), nullable=True)
+    reference_id = Column(Integer, nullable=True)
+    is_read = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=utcnow)
+
+    # Relationships
+    employee = relationship("Employee")
+
+    __table_args__ = (
+        Index("ix_notifications_employee", "employee_id", "is_read"),
+    )
+
+
+# ── Campaign Analysis (AI presentation analysis) ─────────────────────
+
+class CampaignAnalysis(Base):
+    __tablename__ = "campaign_analyses"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    campaign_id = Column(Integer, ForeignKey("campaigns.id"), nullable=False)
+    attachment_id = Column(Integer, ForeignKey("campaign_attachments.id"), nullable=True)
+    extracted_themes = Column(Text, nullable=True)   # JSON array of themes
+    suggested_tags = Column(Text, nullable=True)     # JSON array of matched tags
+    status = Column(String(20), nullable=False, default="pending")
+    error_message = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=utcnow)
+    completed_at = Column(DateTime, nullable=True)
+
+    campaign = relationship("Campaign")
+    attachment = relationship("CampaignAttachment")
+
+    __table_args__ = (
+        Index("ix_campaign_analyses_campaign", "campaign_id"),
+    )
+
+
+
+class CoverageGap(Base):
+    __tablename__ = "coverage_gaps"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    company_name = Column(String(400), nullable=False)
+    company_name_normalized = Column(String(400), nullable=False, index=True)
+    industry = Column(String(200), nullable=True)
+    tier = Column(String(50), nullable=True)
+    contacts_in_crm = Column(Integer, nullable=True)
+    critical_gap_count = Column(Integer, default=0)
+    potential_gap_count = Column(Integer, default=0)
+    total_gap_count = Column(Integer, default=0)
+    missing_domains_critical = Column(Text, nullable=True)    # JSON array
+    missing_titles_critical = Column(Text, nullable=True)     # JSON array
+    missing_domains_potential = Column(Text, nullable=True)   # JSON array
+    missing_titles_potential = Column(Text, nullable=True)    # JSON array
+    upload_batch_id = Column(String(100), nullable=True)
+    created_at = Column(DateTime, default=utcnow)
+
+    __table_args__ = (
+        Index("ix_coverage_gaps_normalized", "company_name_normalized"),
+    )
+

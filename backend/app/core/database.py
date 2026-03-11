@@ -3,14 +3,21 @@ from sqlalchemy.orm import sessionmaker, DeclarativeBase
 
 from app.core.config import settings
 
+# Build engine with DB-specific settings
+_connect_args = {}
+if settings.is_sqlite:
+    _connect_args["check_same_thread"] = False
+
 engine = create_engine(
     settings.DATABASE_URL,
-    connect_args={"check_same_thread": False} if "sqlite" in settings.DATABASE_URL else {},
+    connect_args=_connect_args,
     echo=settings.DEBUG,
+    # PostgreSQL pool settings (ignored for SQLite)
+    **({} if settings.is_sqlite else {"pool_size": 10, "max_overflow": 20, "pool_pre_ping": True}),
 )
 
 # Enable WAL mode and foreign keys for SQLite
-if "sqlite" in settings.DATABASE_URL:
+if settings.is_sqlite:
     @event.listens_for(engine, "connect")
     def set_sqlite_pragma(dbapi_connection, connection_record):
         cursor = dbapi_connection.cursor()
