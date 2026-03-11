@@ -1,12 +1,13 @@
 import bcrypt as _bcrypt
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.auth import create_access_token, get_current_user
+from app.core.rate_limit import login_limiter
 from app.models.models import Employee
-from app.schemas.schemas import LoginRequest, TokenResponse, EmployeeOut, EmployeeSiteLanguageOut
+from app.schemas.schemas import LoginRequest, TokenResponse, EmployeeOut, ChangePasswordRequest
 
 router = APIRouter()
 
@@ -19,54 +20,37 @@ def _verify_password(plain: str, hashed: str) -> bool:
     return _bcrypt.checkpw(plain.encode("utf-8"), hashed.encode("utf-8"))
 
 
-def _employee_to_out(emp: Employee) -> EmployeeOut:
-    sl_list = []
-    for esl in (emp.site_languages or []):
-        if esl.site_language and esl.site_language.is_active:
-            sl_list.append(EmployeeSiteLanguageOut(
-                id=esl.id,
-                site_language_id=esl.site_language_id,
-                name=esl.site_language.name,
-                code=esl.site_language.code,
-            ))
-    return EmployeeOut(
-        id=emp.id,
-        name=emp.name,
-        email=emp.email,
-        role=emp.role,
-        seniority=emp.seniority,
-        primary_language=emp.primary_language,
-        domain_expertise_tags=emp.domain_expertise_tags,
-        outreach_target_per_week=emp.outreach_target_per_week,
-        outreach_target_per_month=emp.outreach_target_per_month,
-        is_active=emp.is_active,
-        approval_status=emp.approval_status,
-        profile_description=emp.profile_description,
-        team_id=emp.team_id,
-        business_area_id=emp.business_area_id,
-        site_id=emp.site_id,
-        team_name=emp.team.name if emp.team else None,
-        business_area_name=emp.business_area.name if emp.business_area else None,
-        site_name=emp.site.name if emp.site else None,
-        uploaded_batch_id=emp.uploaded_batch_id,
-        site_languages=sl_list,
-        created_at=emp.created_at,
-    )
+# Use shared helper from employees module
+from app.api.routes.employees import _to_out as _employee_to_out
 
 
 @router.post("/login", response_model=TokenResponse)
-def login(req: LoginRequest, db: Session = Depends(get_db)):
+def login(req: LoginRequest, request: Request, db: Session = Depends(get_db)):
+    # Rate limiting by IP address
+    client_ip = request.client.host if request.client else "unknown"
+    if login_limiter.is_blocked(client_ip):
+        remaining = login_limiter.remaining_seconds(client_ip)
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Too many login attempts. Try again in {remaining} seconds.",
+        )
+
     employee = db.query(Employee).filter(Employee.email == req.email).first()
     if not employee:
+        login_limiter.record_failure(client_ip)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
 
     # For prototype: accept "password" as default, or check hash if set
     if employee.password_hash:
         if not _verify_password(req.password, employee.password_hash):
+            login_limiter.record_failure(client_ip)
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
     elif req.password != "password":
+        login_limiter.record_failure(client_ip)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
 
+    # Successful login — clear rate limit counter
+    login_limiter.reset(client_ip)
     token = create_access_token(data={"sub": str(employee.id)})
     return TokenResponse(access_token=token, employee=_employee_to_out(employee))
 
@@ -74,3 +58,28 @@ def login(req: LoginRequest, db: Session = Depends(get_db)):
 @router.get("/me", response_model=EmployeeOut)
 def get_me(current_user: Employee = Depends(get_current_user)):
     return _employee_to_out(current_user)
+
+
+@router.post("/change-password")
+def change_password(
+    req: ChangePasswordRequest,
+    db: Session = Depends(get_db),
+    current_user: Employee = Depends(get_current_user),
+):
+    """Change the current user's password."""
+    if req.new_password != req.confirm_password:
+        raise HTTPException(status_code=400, detail="Passwords do not match")
+    if len(req.new_password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
+
+    # Verify current password
+    if current_user.password_hash:
+        if not _verify_password(req.current_password, current_user.password_hash):
+            raise HTTPException(status_code=400, detail="Current password is incorrect")
+    elif req.current_password != "password":
+        raise HTTPException(status_code=400, detail="Current password is incorrect")
+
+    current_user.password_hash = _hash_password(req.new_password)
+    current_user.must_change_password = False
+    db.commit()
+    return {"message": "Password changed successfully"}

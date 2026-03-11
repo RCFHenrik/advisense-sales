@@ -5,7 +5,7 @@ import { useAuth } from '../context/AuthContext';
 import type { FileUploadRecord } from '../types';
 import { formatDateTime } from '../utils/dateFormat';
 
-type UploadTab = 'contacts' | 'meetings' | 'classification' | 'jobtitle_domain' | 'consultants';
+type UploadTab = 'contacts' | 'meetings' | 'classification' | 'jobtitle_domain' | 'expertise_tags' | 'consultants' | 'coverage_gaps';
 
 const TAB_CONFIG: Record<UploadTab, { label: string; endpoint: string; accept: string; description: string }> = {
   contacts: {
@@ -32,11 +32,23 @@ const TAB_CONFIG: Record<UploadTab, { label: string; endpoint: string; accept: s
     accept: '.xlsx,.xls',
     description: 'Import job title to domain mappings (Excel)',
   },
+  expertise_tags: {
+    label: 'Relevance Tags',
+    endpoint: '/uploads/expertise-tags',
+    accept: '.xlsx,.xls,.csv',
+    description: 'Upload relevance tags for contact and consultant matching.',
+  },
   consultants: {
     label: 'Consultants',
     endpoint: '/uploads/consultants',
     accept: '.xlsx,.xls,.csv',
     description: 'Batch import consultants (pending approval)',
+  },
+  coverage_gaps: {
+    label: 'Coverage Gaps',
+    endpoint: '/uploads/coverage-gaps',
+    accept: '.csv',
+    description: 'Import coverage gap analysis (pipe-delimited CSV from LLM analysis)',
   },
 };
 
@@ -197,7 +209,7 @@ export default function UploadPage() {
               )}
 
               {error && (
-                <div style={{ marginTop: 16, padding: 12, background: '#fff5f5', borderRadius: 6, color: '#c53030' }}>
+                <div style={{ marginTop: 16, padding: 12, background: '#fff5f5', borderRadius: 6, color: 'var(--danger)' }}>
                   {error}
                 </div>
               )}
@@ -215,7 +227,7 @@ export default function UploadPage() {
                       <div style={{ fontSize: 12, color: '#718096' }}>Updated</div>
                     </div>
                     <div>
-                      <div style={{ fontSize: 24, fontWeight: 700, color: '#c53030' }}>{result.removed}</div>
+                      <div style={{ fontSize: 24, fontWeight: 700, color: 'var(--danger)' }}>{result.removed}</div>
                       <div style={{ fontSize: 12, color: '#718096' }}>Removed</div>
                     </div>
                     <div>
@@ -224,7 +236,7 @@ export default function UploadPage() {
                     </div>
                   </div>
                   {result.errors?.length > 0 && (
-                    <div style={{ marginTop: 12, color: '#c53030', fontSize: 13 }}>
+                    <div style={{ marginTop: 12, color: 'var(--danger)', fontSize: 13 }}>
                       Warnings: {result.errors.join('; ')}
                     </div>
                   )}
@@ -265,39 +277,39 @@ export default function UploadPage() {
           </div>
 
           <div className="card">
-            <div className="card-header">Upload History</div>
+            <div className="card-header">Upload History — {TAB_CONFIG[activeTab].label}</div>
             <div className="table-wrapper">
               <table>
                 <thead>
                   <tr>
                     <th>File</th>
-                    <th>Type</th>
                     <th>Rows</th>
                     <th>Added</th>
                     <th>Updated</th>
                     <th>Removed</th>
+                    <th>Uploaded by</th>
                     <th>Date</th>
                     {isAdmin && <th style={{ width: 1 }}></th>}
                   </tr>
                 </thead>
                 <tbody>
-                  {history.length === 0 ? (
+                  {history.filter((h) => h.file_type === activeTab).length === 0 ? (
                     <tr><td colSpan={isAdmin ? 8 : 7} className="empty-state">No uploads yet</td></tr>
                   ) : (
-                    history.map((h) => (
+                    history.filter((h) => h.file_type === activeTab).map((h) => (
                       <tr key={h.id}>
                         <td>{h.filename}</td>
-                        <td style={{ textTransform: 'capitalize' }}>{h.file_type.replace('_', ' ')}</td>
                         <td>{h.row_count || '—'}</td>
                         <td style={{ color: '#276749' }}>+{h.added_count}</td>
                         <td style={{ color: '#975a16' }}>~{h.updated_count}</td>
-                        <td style={{ color: '#c53030' }}>-{h.removed_count}</td>
+                        <td style={{ color: 'var(--danger)' }}>-{h.removed_count}</td>
+                        <td>{h.uploaded_by_name || '—'}</td>
                         <td>{formatDateTime(h.uploaded_at)}</td>
                         {isAdmin && (
                           <td>
                             <button
                               className="btn btn-sm btn-outline"
-                              style={{ color: 'var(--danger, #e53e3e)', borderColor: 'var(--danger, #e53e3e)', padding: '2px 8px', fontSize: 12 }}
+                              style={{ color: 'var(--danger)', borderColor: 'var(--danger)', padding: '2px 8px', fontSize: 12 }}
                               onClick={() => handleDeleteUpload(h.id)}
                               title="Delete record"
                             >

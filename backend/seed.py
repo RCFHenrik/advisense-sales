@@ -195,6 +195,11 @@ def seed():
         SystemConfig(key="score_weight_days_since_interaction", value="0.25", description="Scoring weight for days since interaction"),
         SystemConfig(key="score_weight_domain_match", value="0.20", description="Scoring weight for domain match"),
         SystemConfig(key="score_weight_seniority", value="0.10", description="Scoring weight for seniority alignment"),
+        # FX rates (base currency: EUR)
+        SystemConfig(key="fx_rate_EUR", value="0.087", description="Exchange rate SEK → EUR"),
+        SystemConfig(key="fx_rate_NOK", value="1.031", description="Exchange rate SEK → NOK"),
+        SystemConfig(key="fx_rate_DKK", value="0.649", description="Exchange rate SEK → DKK"),
+        SystemConfig(key="fx_rate_GBP", value="0.073", description="Exchange rate SEK → GBP"),
     ]
     db.add_all(configs)
 

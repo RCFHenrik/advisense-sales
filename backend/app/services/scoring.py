@@ -4,7 +4,7 @@ from typing import Optional
 
 from sqlalchemy.orm import Session
 
-from app.models.models import Contact, SystemConfig, HotTopic
+from app.models.models import Contact, SystemConfig, HotTopic, CoverageGap
 from app.core.config import settings
 
 
@@ -29,6 +29,7 @@ class ScoringService:
         self.w_days = self._get_config_float("score_weight_days_since_interaction", settings.SCORE_WEIGHT_DAYS_SINCE_INTERACTION)
         self.w_domain = self._get_config_float("score_weight_domain_match", settings.SCORE_WEIGHT_DOMAIN_MATCH)
         self.w_seniority = self._get_config_float("score_weight_seniority", settings.SCORE_WEIGHT_SENIORITY)
+        self.w_gap_fill = self._get_config_float("score_weight_gap_fill", settings.SCORE_WEIGHT_GAP_FILL)
 
     def _get_config_float(self, key: str, default: float) -> float:
         config = self.db.query(SystemConfig).filter(SystemConfig.key == key).first()
@@ -39,7 +40,7 @@ class ScoringService:
                 pass
         return default
 
-    def score_contact(self, contact: Contact, hot_topic_domains: Optional[set] = None) -> float:
+    def score_contact(self, contact: Contact, hot_topic_domains: Optional[set] = None, gap_map: Optional[dict] = None) -> float:
         score = 0.0
 
         # Tier score (0-1)
@@ -79,6 +80,38 @@ class ScoringService:
         # Seniority proxy from job title
         seniority_score = self._estimate_seniority(contact.job_title)
         score += self.w_seniority * seniority_score
+
+        # Gap fill score — boost contacts whose domain matches a known gap
+        gap_score = 0.0
+        if gap_map and contact.company_name:
+            import json as _json
+            gap = gap_map.get(contact.company_name.lower().strip())
+            if gap and contact.responsibility_domain:
+                domain_lower = contact.responsibility_domain.lower()
+                # Check critical gaps
+                try:
+                    critical_domains = _json.loads(gap.missing_domains_critical) if gap.missing_domains_critical else []
+                except (ValueError, TypeError):
+                    critical_domains = []
+                try:
+                    critical_titles = _json.loads(gap.missing_titles_critical) if gap.missing_titles_critical else []
+                except (ValueError, TypeError):
+                    critical_titles = []
+                # Check potential gaps
+                try:
+                    potential_domains = _json.loads(gap.missing_domains_potential) if gap.missing_domains_potential else []
+                except (ValueError, TypeError):
+                    potential_domains = []
+
+                # Critical match → full score
+                if any(d.lower() in domain_lower or domain_lower in d.lower() for d in critical_domains):
+                    gap_score = 1.0
+                elif any(t.lower() in domain_lower or domain_lower in t.lower() for t in critical_titles):
+                    gap_score = 1.0
+                # Potential match → half score
+                elif any(d.lower() in domain_lower or domain_lower in d.lower() for d in potential_domains):
+                    gap_score = 0.5
+        score += self.w_gap_fill * gap_score
 
         return round(score, 4)
 
@@ -123,9 +156,13 @@ class ScoringService:
         hot_topics = self.db.query(HotTopic).filter(HotTopic.is_active == True).all()
         hot_topic_domains = {ht.responsibility_domain for ht in hot_topics}
 
+        # Pre-load all gap data into a dict keyed by normalized company name
+        all_gaps = self.db.query(CoverageGap).all()
+        gap_map = {g.company_name_normalized: g for g in all_gaps}
+
         contacts = self.db.query(Contact).filter(Contact.status == "active").all()
         for contact in contacts:
-            contact.priority_score = self.score_contact(contact, hot_topic_domains)
+            contact.priority_score = self.score_contact(contact, hot_topic_domains, gap_map)
 
         self.db.commit()
         return len(contacts)

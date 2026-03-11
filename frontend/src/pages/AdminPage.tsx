@@ -18,6 +18,13 @@ export default function AdminPage() {
   const [newLangName, setNewLangName] = useState('');
   const [newLangCode, setNewLangCode] = useState('');
   const [langSaving, setLangSaving] = useState(false);
+  const [editingLangId, setEditingLangId] = useState<number | null>(null);
+  const [editLangCode, setEditLangCode] = useState('');
+
+  // Add currency state
+  const [newCurrCode, setNewCurrCode] = useState('');
+  const [newCurrRate, setNewCurrRate] = useState('');
+  const [currSaving, setCurrSaving] = useState(false);
 
   // System reset state
   const [resetStep, setResetStep] = useState<'preview' | 'confirm' | 'complete'>('preview');
@@ -95,6 +102,49 @@ export default function AdminPage() {
       setSiteLanguages((prev) => prev.filter((l) => l.id !== id));
     } catch {
       setConfigError('Failed to delete language.');
+    }
+  };
+
+  const handleSaveLangCode = async (id: number) => {
+    setConfigError('');
+    try {
+      await api.put(`/admin/site-languages/${id}`, { code: editLangCode.trim() || null });
+      setSiteLanguages((prev) =>
+        prev.map((l) => l.id === id ? { ...l, code: editLangCode.trim() || undefined } : l)
+      );
+      setEditingLangId(null);
+    } catch (err: any) {
+      setConfigError(err.response?.data?.detail || 'Failed to update language code');
+    }
+  };
+
+  const handleAddCurrency = async () => {
+    const code = newCurrCode.trim().toUpperCase();
+    if (!code || !newCurrRate.trim()) return;
+    setCurrSaving(true);
+    setConfigError('');
+    try {
+      await api.put(`/admin/config/fx_rate_${code}`, { value: newCurrRate.trim() });
+      const res = await api.get('/admin/config');
+      setConfigs(res.data);
+      setNewCurrCode('');
+      setNewCurrRate('');
+    } catch (err: any) {
+      setConfigError(err.response?.data?.detail || 'Failed to add currency');
+    } finally {
+      setCurrSaving(false);
+    }
+  };
+
+  const handleDeleteCurrency = async (key: string) => {
+    const code = key.replace('fx_rate_', '');
+    if (!confirm(`Delete FX rate for ${code}?`)) return;
+    setConfigError('');
+    try {
+      await api.delete(`/admin/config/${key}`);
+      setConfigs((prev) => prev.filter((c) => c.key !== key));
+    } catch (err: any) {
+      setConfigError(err.response?.data?.detail || 'Failed to delete currency');
     }
   };
 
@@ -188,65 +238,179 @@ export default function AdminPage() {
         <button
           className={`tab ${tab === 'reset' ? 'active' : ''}`}
           onClick={() => setTab('reset')}
-          style={tab === 'reset' ? { color: 'var(--danger, #e53e3e)' } : { color: '#e53e3e' }}
+          style={tab === 'reset' ? { color: 'var(--danger)' } : { color: 'var(--danger)' }}
         >
           System Reset
         </button>
       </div>
 
       {tab === 'config' && (
-        <div className="card">
-          {configError && (
-            <div style={{ padding: '8px 20px', color: 'var(--danger)', fontSize: 13, borderBottom: '1px solid var(--border)' }}>
-              {configError}
+        <>
+          {/* FX Rates Card */}
+          <div className="card" style={{ marginBottom: 16 }}>
+            <div className="card-header">FX Rates (Base Currency: SEK)</div>
+            {configError && (
+              <div style={{ padding: '8px 20px', color: 'var(--danger)', fontSize: 13, borderBottom: '1px solid var(--border)' }}>
+                {configError}
+              </div>
+            )}
+            <div className="card-body">
+              <p style={{ fontSize: 13, color: '#718096', marginBottom: 12 }}>
+                Revenue is stored in SEK and converted to the local currency of each consultant's site.
+              </p>
+              <div className="table-wrapper">
+                <table>
+                  <thead>
+                    <tr>
+                      <th style={{ width: 100 }}>Currency</th>
+                      <th style={{ width: 150 }}>Rate (1 SEK =)</th>
+                      <th>Description</th>
+                      <th style={{ width: 120 }}></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td><strong>SEK</strong></td>
+                      <td style={{ color: '#718096' }}>1.00 (base)</td>
+                      <td style={{ fontSize: 13, color: '#718096' }}>Base currency — Sweden</td>
+                      <td></td>
+                    </tr>
+                    {configs.filter((c) => c.key.startsWith('fx_rate_')).map((c) => {
+                      const currCode = c.key.replace('fx_rate_', '');
+                      return (
+                        <tr key={c.key}>
+                          <td><strong>{currCode}</strong></td>
+                          <td>
+                            {editingConfig === c.key ? (
+                              <input
+                                className="form-control"
+                                value={editValue}
+                                onChange={(e) => setEditValue(e.target.value)}
+                                style={{ maxWidth: 120 }}
+                                type="number"
+                                step="0.01"
+                                autoFocus
+                              />
+                            ) : (
+                              <strong>{c.value}</strong>
+                            )}
+                          </td>
+                          <td style={{ fontSize: 13, color: '#718096' }}>{c.description}</td>
+                          <td>
+                            {editingConfig === c.key ? (
+                              <div style={{ display: 'flex', gap: 4 }}>
+                                <button className="btn btn-sm btn-primary" onClick={() => handleSaveConfig(c.key)}>Save</button>
+                                <button className="btn btn-sm btn-outline" onClick={() => setEditingConfig(null)}>Cancel</button>
+                              </div>
+                            ) : (
+                              <div style={{ display: 'flex', gap: 4 }}>
+                                <button className="btn btn-sm btn-outline" onClick={() => { setEditingConfig(c.key); setEditValue(c.value); }}>
+                                  Edit
+                                </button>
+                                <button
+                                  className="btn btn-sm btn-outline"
+                                  style={{ color: 'var(--danger)', borderColor: 'var(--danger)', padding: '2px 8px', fontSize: 12 }}
+                                  onClick={() => handleDeleteCurrency(c.key)}
+                                >
+                                  Delete
+                                </button>
+                              </div>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* Add Currency Form */}
+              <div style={{ display: 'flex', gap: 8, marginTop: 16, alignItems: 'flex-end' }}>
+                <div>
+                  <label style={{ display: 'block', fontSize: 12, color: '#4a5568', marginBottom: 4 }}>Currency Code *</label>
+                  <input
+                    className="form-control"
+                    placeholder="e.g. CHF"
+                    value={newCurrCode}
+                    onChange={(e) => setNewCurrCode(e.target.value.toUpperCase())}
+                    style={{ width: 100 }}
+                    onKeyDown={(e) => { if (e.key === 'Enter') handleAddCurrency(); }}
+                  />
+                </div>
+                <div>
+                  <label style={{ display: 'block', fontSize: 12, color: '#4a5568', marginBottom: 4 }}>Rate (1 SEK =) *</label>
+                  <input
+                    className="form-control"
+                    type="number"
+                    step="0.01"
+                    placeholder="e.g. 0.93"
+                    value={newCurrRate}
+                    onChange={(e) => setNewCurrRate(e.target.value)}
+                    style={{ width: 120 }}
+                    onKeyDown={(e) => { if (e.key === 'Enter') handleAddCurrency(); }}
+                  />
+                </div>
+                <button
+                  className="btn btn-primary"
+                  onClick={handleAddCurrency}
+                  disabled={currSaving || !newCurrCode.trim() || !newCurrRate.trim()}
+                >
+                  {currSaving ? 'Adding...' : 'Add Currency'}
+                </button>
+              </div>
             </div>
-          )}
-          <div className="table-wrapper">
-            <table>
-              <thead>
-                <tr>
-                  <th>Setting</th>
-                  <th>Value</th>
-                  <th>Description</th>
-                  <th></th>
-                </tr>
-              </thead>
-              <tbody>
-                {configs.map((c) => (
-                  <tr key={c.key}>
-                    <td style={{ fontFamily: 'monospace', fontSize: 13 }}>{c.key}</td>
-                    <td>
-                      {editingConfig === c.key ? (
-                        <input
-                          className="form-control"
-                          value={editValue}
-                          onChange={(e) => setEditValue(e.target.value)}
-                          style={{ maxWidth: 200 }}
-                          autoFocus
-                        />
-                      ) : (
-                        <strong>{c.value}</strong>
-                      )}
-                    </td>
-                    <td style={{ fontSize: 13, color: '#718096' }}>{c.description}</td>
-                    <td>
-                      {editingConfig === c.key ? (
-                        <div style={{ display: 'flex', gap: 4 }}>
-                          <button className="btn btn-sm btn-primary" onClick={() => handleSaveConfig(c.key)}>Save</button>
-                          <button className="btn btn-sm btn-outline" onClick={() => setEditingConfig(null)}>Cancel</button>
-                        </div>
-                      ) : (
-                        <button className="btn btn-sm btn-outline" onClick={() => { setEditingConfig(c.key); setEditValue(c.value); }}>
-                          Edit
-                        </button>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
           </div>
-        </div>
+
+          {/* General System Config */}
+          <div className="card">
+            <div className="card-header">System Parameters</div>
+            <div className="table-wrapper">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Setting</th>
+                    <th>Value</th>
+                    <th>Description</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {configs.filter((c) => !c.key.startsWith('fx_rate_')).map((c) => (
+                    <tr key={c.key}>
+                      <td style={{ fontFamily: 'monospace', fontSize: 13 }}>{c.key}</td>
+                      <td>
+                        {editingConfig === c.key ? (
+                          <input
+                            className="form-control"
+                            value={editValue}
+                            onChange={(e) => setEditValue(e.target.value)}
+                            style={{ maxWidth: 200 }}
+                            autoFocus
+                          />
+                        ) : (
+                          <strong>{c.value}</strong>
+                        )}
+                      </td>
+                      <td style={{ fontSize: 13, color: '#718096' }}>{c.description}</td>
+                      <td>
+                        {editingConfig === c.key ? (
+                          <div style={{ display: 'flex', gap: 4 }}>
+                            <button className="btn btn-sm btn-primary" onClick={() => handleSaveConfig(c.key)}>Save</button>
+                            <button className="btn btn-sm btn-outline" onClick={() => setEditingConfig(null)}>Cancel</button>
+                          </div>
+                        ) : (
+                          <button className="btn btn-sm btn-outline" onClick={() => { setEditingConfig(c.key); setEditValue(c.value); }}>
+                            Edit
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </>
       )}
 
       {tab === 'mappings' && (
@@ -286,7 +450,7 @@ export default function AdminPage() {
             </div>
 
             {configError && (
-              <div style={{ marginBottom: 12, padding: 8, background: '#fff5f5', borderRadius: 4, color: '#c53030', fontSize: 13 }}>
+              <div style={{ marginBottom: 12, padding: 8, background: '#fff5f5', borderRadius: 4, color: 'var(--danger)', fontSize: 13 }}>
                 {configError}
               </div>
             )}
@@ -342,12 +506,37 @@ export default function AdminPage() {
                       <tr key={l.id}>
                         <td style={{ fontWeight: 500 }}>{l.name}</td>
                         <td style={{ fontFamily: 'monospace', fontSize: 13, color: '#718096' }}>
-                          {l.code || '—'}
+                          {editingLangId === l.id ? (
+                            <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+                              <input
+                                className="form-control"
+                                value={editLangCode}
+                                onChange={(e) => setEditLangCode(e.target.value)}
+                                style={{ width: 60, padding: '2px 6px', fontSize: 13, fontFamily: 'monospace' }}
+                                placeholder="e.g. da"
+                                autoFocus
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter') handleSaveLangCode(l.id);
+                                  if (e.key === 'Escape') setEditingLangId(null);
+                                }}
+                              />
+                              <button className="btn btn-sm btn-primary" style={{ padding: '2px 8px', fontSize: 12 }} onClick={() => handleSaveLangCode(l.id)}>Save</button>
+                              <button className="btn btn-sm btn-outline" style={{ padding: '2px 8px', fontSize: 12 }} onClick={() => setEditingLangId(null)}>Cancel</button>
+                            </div>
+                          ) : (
+                            <span
+                              style={{ cursor: 'pointer', borderBottom: '1px dashed #a0aec0' }}
+                              onClick={() => { setEditingLangId(l.id); setEditLangCode(l.code || ''); }}
+                              title="Click to edit code"
+                            >
+                              {l.code || '—'}
+                            </span>
+                          )}
                         </td>
                         <td>
                           <button
                             className="btn btn-sm btn-outline"
-                            style={{ color: 'var(--danger, #e53e3e)', borderColor: 'var(--danger, #e53e3e)', padding: '2px 8px', fontSize: 12 }}
+                            style={{ color: 'var(--danger)', borderColor: 'var(--danger)', padding: '2px 8px', fontSize: 12 }}
                             onClick={() => handleDeleteLanguage(l.id)}
                             title="Remove language"
                           >
@@ -442,12 +631,12 @@ export default function AdminPage() {
 
       {tab === 'reset' && (
         <div className="card">
-          <div className="card-header" style={{ color: 'var(--danger, #e53e3e)' }}>
+          <div className="card-header" style={{ color: 'var(--danger)' }}>
             System Reset
           </div>
           <div className="card-body" style={{ padding: 20 }}>
             {resetError && (
-              <div style={{ marginBottom: 12, padding: 8, background: '#fff5f5', borderRadius: 4, color: '#c53030', fontSize: 13 }}>
+              <div style={{ marginBottom: 12, padding: 8, background: '#fff5f5', borderRadius: 4, color: 'var(--danger)', fontSize: 13 }}>
                 {resetError}
               </div>
             )}
@@ -457,9 +646,9 @@ export default function AdminPage() {
               <div>
                 <div style={{
                   padding: 16, marginBottom: 16, background: '#fff5f5',
-                  border: '2px solid var(--danger, #e53e3e)', borderRadius: 8,
+                  border: '2px solid var(--danger)', borderRadius: 8,
                 }}>
-                  <div style={{ fontWeight: 700, fontSize: 16, color: '#c53030', marginBottom: 8 }}>
+                  <div style={{ fontWeight: 700, fontSize: 16, color: 'var(--danger)', marginBottom: 8 }}>
                     Warning: This will permanently delete all imported data
                   </div>
                   <div style={{ fontSize: 13, color: '#742a2a', lineHeight: 1.6 }}>
@@ -481,6 +670,9 @@ export default function AdminPage() {
                       <tr><td>Meetings</td><td style={{ textAlign: 'right', fontWeight: 600 }}>{resetPreview.meetings_count}</td></tr>
                       <tr><td>Outreach Records</td><td style={{ textAlign: 'right', fontWeight: 600 }}>{resetPreview.outreach_records_count}</td></tr>
                       <tr><td>Negations</td><td style={{ textAlign: 'right', fontWeight: 600 }}>{resetPreview.negations_count}</td></tr>
+                      <tr><td>Campaigns</td><td style={{ textAlign: 'right', fontWeight: 600 }}>{resetPreview.campaigns_count ?? 0}</td></tr>
+                      <tr><td>Campaign Recipients</td><td style={{ textAlign: 'right', fontWeight: 600 }}>{resetPreview.campaign_recipients_count ?? 0}</td></tr>
+                      <tr><td>Campaign Attachments</td><td style={{ textAlign: 'right', fontWeight: 600 }}>{resetPreview.campaign_attachments_count ?? 0}</td></tr>
                       <tr><td>Suppression List</td><td style={{ textAlign: 'right', fontWeight: 600 }}>{resetPreview.suppression_entries_count}</td></tr>
                       <tr><td>Imported Consultants</td><td style={{ textAlign: 'right', fontWeight: 600 }}>{resetPreview.imported_consultants_count}</td></tr>
                       <tr><td>JobTitle Domains</td><td style={{ textAlign: 'right', fontWeight: 600 }}>{resetPreview.jobtitle_domains_count}</td></tr>
@@ -512,7 +704,7 @@ export default function AdminPage() {
                   {backupDownloaded && (
                     <button
                       className="btn"
-                      style={{ background: 'var(--danger, #e53e3e)', color: '#fff', border: 'none' }}
+                      style={{ background: 'var(--danger)', color: '#fff', border: 'none' }}
                       onClick={() => setResetStep('confirm')}
                     >
                       Step 2: Proceed to Reset
@@ -532,11 +724,11 @@ export default function AdminPage() {
               <div>
                 <div style={{
                   padding: 24, background: '#fff5f5',
-                  border: '2px solid var(--danger, #e53e3e)', borderRadius: 8,
+                  border: '2px solid var(--danger)', borderRadius: 8,
                   textAlign: 'center',
                 }}>
                   <div style={{ fontSize: 48, marginBottom: 12 }}>&#9888;</div>
-                  <div style={{ fontWeight: 700, fontSize: 18, color: '#c53030', marginBottom: 12 }}>
+                  <div style={{ fontWeight: 700, fontSize: 18, color: 'var(--danger)', marginBottom: 12 }}>
                     Final Confirmation
                   </div>
                   <div style={{ fontSize: 14, color: '#742a2a', marginBottom: 20, lineHeight: 1.6 }}>
@@ -560,7 +752,7 @@ export default function AdminPage() {
                     <button
                       className="btn"
                       style={{
-                        background: confirmText === 'RESET' ? 'var(--danger, #e53e3e)' : '#e2e8f0',
+                        background: confirmText === 'RESET' ? 'var(--danger)' : '#e2e8f0',
                         color: confirmText === 'RESET' ? '#fff' : '#a0aec0',
                         border: 'none',
                         cursor: confirmText === 'RESET' ? 'pointer' : 'not-allowed',
@@ -609,8 +801,9 @@ export default function AdminPage() {
             <div style={{ marginTop: 32, paddingTop: 20, borderTop: '1px solid var(--border, #e2e8f0)' }}>
               <h4 style={{ marginBottom: 8 }}>Restore from Backup</h4>
               <div style={{ fontSize: 13, color: '#718096', marginBottom: 12 }}>
-                Upload a previously downloaded backup file to restore suppression lists
-                and flag contacts that were previously contacted.
+                Upload a previously downloaded backup file to restore suppression lists,
+                flag contacts that were previously contacted, and recover manually curated
+                data (expert areas, decision maker flags).
               </div>
               <div style={{ position: 'relative', display: 'inline-block' }}>
                 <button className="btn btn-outline" disabled={resetLoading}>
@@ -634,6 +827,9 @@ export default function AdminPage() {
                   <div style={{ fontSize: 13 }}>
                     <div>Suppression entries restored: <strong>{restoreResult.suppression_restored}</strong></div>
                     <div>Contacts flagged as previously contacted: <strong>{restoreResult.contacts_flagged}</strong></div>
+                    {restoreResult.contact_enrichments_restored > 0 && (
+                      <div>Contact enrichments restored (expert areas, decision maker): <strong>{restoreResult.contact_enrichments_restored}</strong></div>
+                    )}
                   </div>
                   {restoreResult.warnings?.length > 0 && (
                     <div style={{ marginTop: 8, maxHeight: 150, overflowY: 'auto' }}>

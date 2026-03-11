@@ -1,6 +1,9 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef, useLayoutEffect, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import { useAuth } from '../context/AuthContext';
 import api from '../api/client';
+import MultiSelectFilter from '../components/MultiSelectFilter';
+import ActiveFiltersBar from '../components/ActiveFiltersBar';
 import { formatDateTime } from '../utils/dateFormat';
 import type { Employee, Role } from '../types';
 
@@ -142,6 +145,195 @@ function SortableTh({ label, field, sortKeys, onSort, style }: SortableThProps) 
   );
 }
 
+// ── Searchable consultant filter with portal dropdown ───────────────
+
+function ConsultantSearch({
+  employees,
+  search,
+  onSearchChange,
+}: {
+  employees: Employee[];
+  search: string;
+  onSearchChange: (v: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [highlightIdx, setHighlightIdx] = useState(0);
+  const [pos, setPos] = useState({ top: 0, left: 0, width: 0 });
+  const wrapperRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
+
+  const suggestions = useMemo(() => {
+    if (!search.trim() || search.trim().length < 1) return [];
+    const s = search.toLowerCase();
+    return employees
+      .filter(
+        (e) =>
+          e.name.toLowerCase().includes(s) ||
+          e.email.toLowerCase().includes(s) ||
+          (e.business_area_name || '').toLowerCase().includes(s) ||
+          (e.team_name || '').toLowerCase().includes(s) ||
+          (e.site_name || '').toLowerCase().includes(s)
+      )
+      .slice(0, 12);
+  }, [employees, search]);
+
+  const updatePosition = useCallback(() => {
+    if (!inputRef.current) return;
+    const rect = inputRef.current.getBoundingClientRect();
+    setPos({
+      top: rect.bottom + window.scrollY + 2,
+      left: rect.left + window.scrollX,
+      width: Math.max(rect.width, 350),
+    });
+  }, []);
+
+  useLayoutEffect(() => {
+    if (!open) return;
+    updatePosition();
+    const handler = () => updatePosition();
+    window.addEventListener('scroll', handler, true);
+    window.addEventListener('resize', handler);
+    return () => {
+      window.removeEventListener('scroll', handler, true);
+      window.removeEventListener('resize', handler);
+    };
+  }, [open, updatePosition]);
+
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e: MouseEvent) => {
+      const target = e.target as Node;
+      if (
+        wrapperRef.current && !wrapperRef.current.contains(target) &&
+        listRef.current && !listRef.current.contains(target)
+      ) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [open]);
+
+  useEffect(() => { setHighlightIdx(0); }, [search]);
+
+  useEffect(() => {
+    if (!open || !listRef.current) return;
+    const items = listRef.current.children;
+    if (items[highlightIdx]) {
+      (items[highlightIdx] as HTMLElement).scrollIntoView({ block: 'nearest' });
+    }
+  }, [highlightIdx, open]);
+
+  const handleSelect = (emp: Employee) => {
+    onSearchChange(emp.name);
+    setOpen(false);
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (!open || suggestions.length === 0) {
+      if (e.key === 'ArrowDown' && suggestions.length > 0) {
+        setOpen(true);
+        e.preventDefault();
+      }
+      return;
+    }
+    switch (e.key) {
+      case 'ArrowDown':
+        e.preventDefault();
+        setHighlightIdx((prev) => Math.min(prev + 1, suggestions.length - 1));
+        break;
+      case 'ArrowUp':
+        e.preventDefault();
+        setHighlightIdx((prev) => Math.max(prev - 1, 0));
+        break;
+      case 'Enter':
+        e.preventDefault();
+        if (suggestions[highlightIdx]) handleSelect(suggestions[highlightIdx]);
+        break;
+      case 'Escape':
+        setOpen(false);
+        break;
+    }
+  };
+
+  const showDropdown = open && search.trim().length >= 1 && suggestions.length > 0;
+
+  return (
+    <div ref={wrapperRef} style={{ marginBottom: 12, position: 'relative', maxWidth: 400 }}>
+      <input
+        ref={inputRef}
+        className="form-control"
+        placeholder="Search name, email, business area, team, site..."
+        value={search}
+        onChange={(e) => {
+          onSearchChange(e.target.value);
+          setOpen(true);
+        }}
+        onFocus={() => { if (search.trim().length >= 1) setOpen(true); }}
+        onKeyDown={handleKeyDown}
+      />
+      {search && (
+        <button
+          onClick={() => { onSearchChange(''); setOpen(false); }}
+          style={{
+            position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)',
+            background: 'none', border: 'none', cursor: 'pointer', color: '#999', fontSize: 16,
+            padding: '0 4px', lineHeight: 1,
+          }}
+          title="Clear search"
+        >
+          &times;
+        </button>
+      )}
+      {showDropdown &&
+        createPortal(
+          <div
+            ref={listRef}
+            style={{
+              position: 'absolute',
+              top: pos.top,
+              left: pos.left,
+              width: pos.width,
+              background: '#fff',
+              border: '1px solid #e2e8f0',
+              borderRadius: 6,
+              boxShadow: '0 4px 12px rgba(0,0,0,0.18)',
+              maxHeight: 280,
+              overflowY: 'auto',
+              zIndex: 9999,
+            }}
+          >
+            {suggestions.map((emp, idx) => (
+              <div
+                key={emp.id}
+                style={{
+                  padding: '8px 12px',
+                  cursor: 'pointer',
+                  fontSize: 13,
+                  background: idx === highlightIdx ? '#edf2f7' : '#fff',
+                  borderBottom: '1px solid #f7fafc',
+                }}
+                onMouseEnter={() => setHighlightIdx(idx)}
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  handleSelect(emp);
+                }}
+              >
+                <strong>{emp.name}</strong>
+                {emp.email ? <span style={{ color: '#718096', marginLeft: 8, fontSize: 12 }}>{emp.email}</span> : null}
+                <div style={{ color: '#a0aec0', fontSize: 11 }}>
+                  {[emp.business_area_name, emp.team_name, emp.site_name].filter(Boolean).join(' · ') || '—'}
+                </div>
+              </div>
+            ))}
+          </div>,
+          document.body,
+        )}
+    </div>
+  );
+}
+
 // ── Main Component ──────────────────────────────────────────────────
 
 export default function EmployeesPage() {
@@ -152,6 +344,12 @@ export default function EmployeesPage() {
 
   // Search
   const [search, setSearch] = useState('');
+
+  // Category filters
+  const [filterSeniority, setFilterSeniority] = useState<string[]>([]);
+  const [filterBA, setFilterBA] = useState<string[]>([]);
+  const [filterTeam, setFilterTeam] = useState<string[]>([]);
+  const [filterSite, setFilterSite] = useState<string[]>([]);
 
   // Sorting
   const [sortKeys, setSortKeys] = useState<SortKey[]>([]);
@@ -195,7 +393,7 @@ export default function EmployeesPage() {
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editSaving, setEditSaving] = useState(false);
   const [editFields, setEditFields] = useState({
-    name: '', email: '', seniority: '', business_area: '', team: '', site: '', primary_language: '', profile_description: '',
+    name: '', email: '', seniority: '', business_area: '', team: '', site: '', primary_language: '', profile_description: '', domain_expertise_tags: '', relevance_tags: '',
   });
   const [csvOptionsLoading, setCsvOptionsLoading] = useState(false);
   const [bulkEditFields, setBulkEditFields] = useState({
@@ -211,24 +409,55 @@ export default function EmployeesPage() {
   const [roleSaving, setRoleSaving] = useState<number | null>(null);
   const isAdmin = user?.role === 'admin';
 
+  // Reset password modal
+  const [resetPwModal, setResetPwModal] = useState<{ employee: Employee; tempPassword: string } | null>(null);
+  const [resetPwLoading, setResetPwLoading] = useState<number | null>(null);
+
   const canAddConsultant = ['admin', 'ba_manager', 'team_manager'].includes(user?.role || '');
   const canApprove = ['admin', 'ba_manager', 'team_manager'].includes(user?.role || '');
   const canBatchUpload = ['admin', 'ba_manager'].includes(user?.role || '');
   const canBulkManage = ['admin', 'ba_manager', 'team_manager'].includes(user?.role || '');
 
   // Filtered + sorted employees
+  // Derive unique filter options from employees
+  const filterOpts = useMemo(() => {
+    const seniorities = new Set<string>();
+    const bas = new Set<string>();
+    const teams = new Set<string>();
+    const sites = new Set<string>();
+    employees.forEach(e => {
+      if (e.seniority) seniorities.add(e.seniority);
+      if (e.business_area_name) bas.add(e.business_area_name);
+      if (e.team_name) teams.add(e.team_name);
+      if (e.site_name) sites.add(e.site_name);
+    });
+    return {
+      seniorities: [...seniorities].sort(),
+      bas: [...bas].sort(),
+      teams: [...teams].sort(),
+      sites: [...sites].sort(),
+    };
+  }, [employees]);
+
   const filteredEmployees = useMemo(() => {
-    if (!search.trim()) return employees;
-    const s = search.toLowerCase();
-    return employees.filter(e =>
-      e.name.toLowerCase().includes(s) ||
-      e.email.toLowerCase().includes(s) ||
-      (e.business_area_name || '').toLowerCase().includes(s) ||
-      (e.team_name || '').toLowerCase().includes(s) ||
-      (e.site_name || '').toLowerCase().includes(s) ||
-      (e.seniority || '').toLowerCase().includes(s)
-    );
-  }, [employees, search]);
+    let result = employees;
+    if (filterSeniority.length) result = result.filter(e => filterSeniority.includes(e.seniority || ''));
+    if (filterBA.length) result = result.filter(e => filterBA.includes(e.business_area_name || ''));
+    if (filterTeam.length) result = result.filter(e => filterTeam.includes(e.team_name || ''));
+    if (filterSite.length) result = result.filter(e => filterSite.includes(e.site_name || ''));
+    if (search.trim()) {
+      const s = search.toLowerCase();
+      result = result.filter(e =>
+        e.name.toLowerCase().includes(s) ||
+        e.email.toLowerCase().includes(s) ||
+        (e.business_area_name || '').toLowerCase().includes(s) ||
+        (e.team_name || '').toLowerCase().includes(s) ||
+        (e.site_name || '').toLowerCase().includes(s) ||
+        (e.seniority || '').toLowerCase().includes(s)
+      );
+    }
+    return result;
+  }, [employees, search, filterSeniority, filterBA, filterTeam, filterSite]);
 
   const sortedEmployees = useMemo(() => sortEmployees(filteredEmployees, sortKeys), [filteredEmployees, sortKeys]);
 
@@ -422,9 +651,32 @@ export default function EmployeesPage() {
     }
   };
 
+  // ── Reset password ──────────────────────────────────────────────
+  const handleResetPassword = async (emp: Employee) => {
+    if (!window.confirm(`Generate a temporary password for ${emp.name}? They will need to change it on their next login.`)) return;
+    setResetPwLoading(emp.id);
+    try {
+      const res = await api.post(`/employees/${emp.id}/reset-password`);
+      setResetPwModal({ employee: emp, tempPassword: res.data.temporary_password });
+    } catch (err: any) {
+      alert(err.response?.data?.detail || 'Failed to reset password');
+    } finally {
+      setResetPwLoading(null);
+    }
+  };
+
   // ── Inline edit ──────────────────────────────────────────────────
   const startEditing = (emp: Employee) => {
     setEditingId(emp.id);
+    let expertTags = '';
+    if (emp.domain_expertise_tags) {
+      try {
+        const arr = JSON.parse(emp.domain_expertise_tags);
+        expertTags = Array.isArray(arr) ? arr.join(', ') : emp.domain_expertise_tags;
+      } catch {
+        expertTags = emp.domain_expertise_tags;
+      }
+    }
     setEditFields({
       name: emp.name || '',
       email: emp.email?.includes('@placeholder.local') ? '' : (emp.email || ''),
@@ -434,6 +686,14 @@ export default function EmployeesPage() {
       site: emp.site_name || '',
       primary_language: emp.primary_language || '',
       profile_description: emp.profile_description || '',
+      domain_expertise_tags: expertTags,
+      relevance_tags: (() => {
+        if (!emp.relevance_tags) return '';
+        try {
+          const arr = JSON.parse(emp.relevance_tags);
+          return Array.isArray(arr) ? arr.join(', ') : emp.relevance_tags;
+        } catch { return emp.relevance_tags; }
+      })(),
     });
   };
 
@@ -459,6 +719,16 @@ export default function EmployeesPage() {
       if (editFields.site && editFields.site !== (orig.site_name || '')) payload.site = editFields.site;
       if (editFields.primary_language && editFields.primary_language !== (orig.primary_language || '')) payload.primary_language = editFields.primary_language;
       if (editFields.profile_description !== (orig.profile_description || '')) payload.profile_description = editFields.profile_description;
+      // Compare expertise tags: convert current edit field to JSON array string for comparison
+      const editTagsArray = editFields.domain_expertise_tags.split(',').map((t) => t.trim()).filter(Boolean);
+      const editTagsJson = JSON.stringify(editTagsArray);
+      const origTags = orig.domain_expertise_tags || '[]';
+      if (editTagsJson !== origTags) payload.domain_expertise_tags = editTagsJson;
+      // Compare relevance tags
+      const editRtArray = editFields.relevance_tags.split(',').map((t) => t.trim()).filter(Boolean);
+      const editRtJson = JSON.stringify(editRtArray);
+      const origRt = orig.relevance_tags || '[]';
+      if (editRtJson !== origRt) payload.relevance_tags = editRtJson;
 
       // Only call API if there are actual changes beyond employee_ids
       if (Object.keys(payload).length > 1) {
@@ -648,7 +918,7 @@ export default function EmployeesPage() {
   }, [selectedEmployees]);
 
   // Column count for empty state
-  const baseColCount = approvalFilter === 'approved' ? 13 : 10;
+  const baseColCount = approvalFilter === 'approved' ? 14 : 10;
   const colCount = (canBulkManage && approvalFilter === 'approved' ? 1 : 0) + baseColCount;
 
   return (
@@ -800,7 +1070,7 @@ export default function EmployeesPage() {
               className="btn btn-sm btn-outline"
               style={{
                 fontSize: 12, padding: '4px 10px', marginLeft: 'auto',
-                color: 'var(--danger, #e53e3e)', borderColor: 'var(--danger, #e53e3e)',
+                color: 'var(--danger)', borderColor: 'var(--danger)',
               }}
               onClick={() => {
                 setSelectedIds(new Set(selectableEmployees.map((emp) => emp.id)));
@@ -858,7 +1128,7 @@ export default function EmployeesPage() {
                 className="btn btn-sm btn-outline"
                 style={{
                   fontSize: 13, padding: '4px 12px',
-                  color: 'var(--danger, #e53e3e)', borderColor: 'var(--danger, #e53e3e)',
+                  color: 'var(--danger)', borderColor: 'var(--danger)',
                 }}
                 onClick={openBulkDeactivateModal}
               >
@@ -876,15 +1146,30 @@ export default function EmployeesPage() {
         </div>
       )}
 
-      <div style={{ marginBottom: 12 }}>
-        <input
-          className="form-control"
-          placeholder="Search name, email, business area, team, site..."
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          style={{ maxWidth: 400 }}
-        />
+      <ConsultantSearch
+        employees={employees}
+        search={search}
+        onSearchChange={setSearch}
+      />
+
+      <div className="filters-panel" style={{ marginBottom: 12 }}>
+        <MultiSelectFilter options={filterOpts.seniorities} selected={filterSeniority} onChange={setFilterSeniority} placeholder="All Seniorities" />
+        <MultiSelectFilter options={filterOpts.bas} selected={filterBA} onChange={setFilterBA} placeholder="All Business Areas" />
+        <MultiSelectFilter options={filterOpts.teams} selected={filterTeam} onChange={setFilterTeam} placeholder="All Teams" />
+        <MultiSelectFilter options={filterOpts.sites} selected={filterSite} onChange={setFilterSite} placeholder="All Sites" />
       </div>
+
+      <ActiveFiltersBar
+        chips={[
+          ...filterSeniority.map(v => ({ category: 'Seniority', value: v, onRemove: () => setFilterSeniority(prev => prev.filter(x => x !== v)) })),
+          ...filterBA.map(v => ({ category: 'BA', value: v, onRemove: () => setFilterBA(prev => prev.filter(x => x !== v)) })),
+          ...filterTeam.map(v => ({ category: 'Team', value: v, onRemove: () => setFilterTeam(prev => prev.filter(x => x !== v)) })),
+          ...filterSite.map(v => ({ category: 'Site', value: v, onRemove: () => setFilterSite(prev => prev.filter(x => x !== v)) })),
+        ]}
+        onClearAll={() => {
+          setFilterSeniority([]); setFilterBA([]); setFilterTeam([]); setFilterSite([]);
+        }}
+      />
 
       <div className="card">
         <div className="table-wrapper">
@@ -917,6 +1202,8 @@ export default function EmployeesPage() {
                 )}
                 {approvalFilter === 'approved' && <th>Target/Month</th>}
                 {approvalFilter === 'approved' && <th>Profile Description</th>}
+                {approvalFilter === 'approved' && <th>Expert Areas</th>}
+                {approvalFilter === 'approved' && <th>Relevance Tags</th>}
                 {approvalFilter === 'approved' && canApprove && (
                   <th style={{ width: 1, position: 'sticky', right: 0, background: '#f7fafc', zIndex: 2, boxShadow: '-2px 0 4px rgba(0,0,0,0.06)' }}>Actions</th>
                 )}
@@ -1084,6 +1371,54 @@ export default function EmployeesPage() {
                         )}
                       </td>
                     )}
+                    {/* Expert Areas */}
+                    {approvalFilter === 'approved' && (
+                      <td style={{ fontSize: 12, color: '#4a5568', maxWidth: 200 }}>
+                        {isEditing ? (
+                          <input className="form-control" style={iStyle} value={editFields.domain_expertise_tags}
+                            placeholder="e.g. Risk, IFRS 9..."
+                            onChange={(ev) => setEditFields({ ...editFields, domain_expertise_tags: ev.target.value })} />
+                        ) : (
+                          (() => {
+                            if (!e.domain_expertise_tags) return <span style={{ color: '#a0aec0' }}>—</span>;
+                            try {
+                              const arr = JSON.parse(e.domain_expertise_tags);
+                              if (Array.isArray(arr) && arr.length > 0) {
+                                const display = arr.join(', ');
+                                return <span title={display}>{display.length > 80 ? display.slice(0, 80) + '...' : display}</span>;
+                              }
+                              return <span style={{ color: '#a0aec0' }}>—</span>;
+                            } catch {
+                              return <span title={e.domain_expertise_tags}>{e.domain_expertise_tags}</span>;
+                            }
+                          })()
+                        )}
+                      </td>
+                    )}
+                    {/* Relevance Tags */}
+                    {approvalFilter === 'approved' && (
+                      <td style={{ fontSize: 12, color: '#285e61', maxWidth: 200 }}>
+                        {isEditing ? (
+                          <input className="form-control" style={iStyle} value={editFields.relevance_tags}
+                            placeholder="e.g. Public Sector, Audit..."
+                            onChange={(ev) => setEditFields({ ...editFields, relevance_tags: ev.target.value })} />
+                        ) : (
+                          (() => {
+                            if (!e.relevance_tags) return <span style={{ color: '#a0aec0' }}>—</span>;
+                            try {
+                              const arr = JSON.parse(e.relevance_tags);
+                              if (Array.isArray(arr) && arr.length > 0) {
+                                const display = arr.join(', ');
+                                return <span title={display}>{display.length > 80 ? display.slice(0, 80) + '...' : display}</span>;
+                              }
+                              return <span style={{ color: '#a0aec0' }}>—</span>;
+                            } catch {
+                              return <span title={e.relevance_tags}>{e.relevance_tags}</span>;
+                            }
+                          })()
+                        )}
+                      </td>
+                    )}
                     {/* Actions column — sticky right */}
                     {approvalFilter === 'approved' && canApprove && (
                       <td style={{ whiteSpace: 'nowrap', position: 'sticky', right: 0, background: isEditing ? '#fffff0' : selectedIds.has(e.id) ? '#ebf8ff' : '#fff', zIndex: 1, boxShadow: '-2px 0 4px rgba(0,0,0,0.06)' }}>
@@ -1121,7 +1456,18 @@ export default function EmployeesPage() {
                             {editable && (
                               <button
                                 className="btn btn-sm btn-outline"
-                                style={{ color: 'var(--danger, #e53e3e)', borderColor: 'var(--danger, #e53e3e)', padding: '2px 8px', fontSize: 12 }}
+                                style={{ padding: '2px 8px', fontSize: 12 }}
+                                onClick={() => handleResetPassword(e)}
+                                disabled={resetPwLoading === e.id}
+                                title={`Reset password for ${e.name}`}
+                              >
+                                {resetPwLoading === e.id ? '...' : 'Reset PW'}
+                              </button>
+                            )}
+                            {editable && (
+                              <button
+                                className="btn btn-sm btn-outline"
+                                style={{ color: 'var(--danger)', borderColor: 'var(--danger)', padding: '2px 8px', fontSize: 12 }}
                                 onClick={() => handleDeactivate(e)}
                                 title={`Remove ${e.name}`}
                               >
@@ -1143,7 +1489,7 @@ export default function EmployeesPage() {
                         </button>
                         <button
                           className="btn btn-sm btn-outline"
-                          style={{ color: 'var(--danger, #e53e3e)', borderColor: 'var(--danger, #e53e3e)', padding: '3px 10px', fontSize: 12 }}
+                          style={{ color: 'var(--danger)', borderColor: 'var(--danger)', padding: '3px 10px', fontSize: 12 }}
                           onClick={() => handleApproval(e.id, 'rejected')}
                         >
                           Reject
@@ -1280,7 +1626,7 @@ export default function EmployeesPage() {
               )}
 
               {batchError && (
-                <div style={{ marginTop: 12, padding: 12, background: '#fff5f5', borderRadius: 6, color: '#c53030' }}>
+                <div style={{ marginTop: 12, padding: 12, background: '#fff5f5', borderRadius: 6, color: 'var(--danger)' }}>
                   {batchError}
                 </div>
               )}
@@ -1343,7 +1689,7 @@ export default function EmployeesPage() {
             <div className="modal-header">Add Consultant</div>
             <div className="modal-body">
               {addError && (
-                <div style={{ marginBottom: 12, padding: 8, background: '#fff5f5', borderRadius: 4, color: '#c53030', fontSize: 13 }}>
+                <div style={{ marginBottom: 12, padding: 8, background: '#fff5f5', borderRadius: 4, color: 'var(--danger)', fontSize: 13 }}>
                   {addError}
                 </div>
               )}
@@ -1440,7 +1786,7 @@ export default function EmployeesPage() {
       {showBulkDeactivateModal && (
         <div className="modal-overlay" onClick={() => { if (!bulkDeactivating) setShowBulkDeactivateModal(false); }}>
           <div className="modal" style={{ maxWidth: 520 }} onClick={(ev) => ev.stopPropagation()}>
-            <div className="modal-header" style={{ color: 'var(--danger, #e53e3e)' }}>
+            <div className="modal-header" style={{ color: 'var(--danger)' }}>
               Deactivate Consultants
             </div>
             <div className="modal-body">
@@ -1468,7 +1814,7 @@ export default function EmployeesPage() {
                 </>
               ) : (
                 <div style={{ padding: 16, background: bulkDeactivateResult.success_count > 0 ? '#f0fff4' : '#fff5f5', borderRadius: 6 }}>
-                  <div style={{ fontWeight: 600, marginBottom: 12, color: bulkDeactivateResult.success_count > 0 ? '#276749' : '#c53030' }}>
+                  <div style={{ fontWeight: 600, marginBottom: 12, color: bulkDeactivateResult.success_count > 0 ? '#276749' : 'var(--danger)' }}>
                     Deactivation Complete
                   </div>
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 12, marginBottom: 12 }}>
@@ -1501,7 +1847,7 @@ export default function EmployeesPage() {
                   </button>
                   <button
                     className="btn btn-primary"
-                    style={{ background: 'var(--danger, #e53e3e)', borderColor: 'var(--danger, #e53e3e)' }}
+                    style={{ background: 'var(--danger)', borderColor: 'var(--danger)' }}
                     onClick={handleBulkDeactivate}
                     disabled={bulkDeactivating}
                   >
@@ -1661,7 +2007,7 @@ export default function EmployeesPage() {
                 </>
               ) : (
                 <div style={{ padding: 16, background: bulkEditResult.success_count > 0 ? '#f0fff4' : '#fff5f5', borderRadius: 6 }}>
-                  <div style={{ fontWeight: 600, marginBottom: 12, color: bulkEditResult.success_count > 0 ? '#276749' : '#c53030' }}>
+                  <div style={{ fontWeight: 600, marginBottom: 12, color: bulkEditResult.success_count > 0 ? '#276749' : 'var(--danger)' }}>
                     Update Complete
                   </div>
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 12, marginBottom: 12 }}>
@@ -1701,6 +2047,58 @@ export default function EmployeesPage() {
                   </button>
                 </>
               )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Reset Password Modal */}
+      {resetPwModal && (
+        <div className="modal-overlay" onClick={() => setResetPwModal(null)}>
+          <div className="modal" style={{ maxWidth: 420 }} onClick={(ev) => ev.stopPropagation()}>
+            <div className="modal-header">Temporary Password Generated</div>
+            <div className="modal-body">
+              <p style={{ marginBottom: 12, color: '#4a5568' }}>
+                A temporary password has been generated for <strong>{resetPwModal.employee.name}</strong>.
+              </p>
+              <p style={{ fontSize: 13, color: '#718096', marginBottom: 12 }}>
+                Share this password securely with the consultant. They will be required to change it on their next login.
+              </p>
+              <div
+                style={{
+                  background: '#f7fafc',
+                  border: '2px dashed #cbd5e0',
+                  borderRadius: 8,
+                  padding: '14px 16px',
+                  textAlign: 'center',
+                  fontFamily: 'monospace',
+                  fontSize: 20,
+                  fontWeight: 700,
+                  color: '#2d3748',
+                  letterSpacing: 1.5,
+                  userSelect: 'all',
+                  cursor: 'text',
+                }}
+              >
+                {resetPwModal.tempPassword}
+              </div>
+              <p style={{ fontSize: 12, color: '#a0aec0', marginTop: 8, textAlign: 'center' }}>
+                Click above to select, then copy.
+              </p>
+            </div>
+            <div className="modal-footer">
+              <button
+                className="btn btn-primary"
+                onClick={() => {
+                  navigator.clipboard.writeText(resetPwModal.tempPassword).catch(() => {});
+                  setResetPwModal(null);
+                }}
+              >
+                Copy & Close
+              </button>
+              <button className="btn btn-outline" onClick={() => setResetPwModal(null)}>
+                Close
+              </button>
             </div>
           </div>
         </div>

@@ -303,7 +303,7 @@ export default function TemplatesPage() {
                       </button>
                       <button
                         className="btn btn-sm btn-outline"
-                        style={{ color: 'var(--danger, #e53e3e)', borderColor: 'var(--danger, #e53e3e)' }}
+                        style={{ color: 'var(--danger)', borderColor: 'var(--danger)' }}
                         onClick={() => handleDeleteTemplate(t)}
                         title="Delete template"
                       >
@@ -412,7 +412,7 @@ export default function TemplatesPage() {
                         </button>
                         <button
                           className="btn btn-sm btn-outline"
-                          style={{ color: 'var(--danger, #e53e3e)', borderColor: 'var(--danger, #e53e3e)' }}
+                          style={{ color: 'var(--danger)', borderColor: 'var(--danger)' }}
                           onClick={() => handleDeleteTopic(ht)}
                           title="Deactivate"
                         >
@@ -451,7 +451,7 @@ export default function TemplatesPage() {
               <div className="form-row">
                 <div className="form-group">
                   <label>
-                    Name <span style={{ color: 'var(--danger, #e53e3e)' }}>*</span>
+                    Name <span style={{ color: 'var(--danger)' }}>*</span>
                   </label>
                   <input
                     className="form-control"
@@ -462,7 +462,7 @@ export default function TemplatesPage() {
                 </div>
                 <div className="form-group">
                   <label>
-                    Language <span style={{ color: 'var(--danger, #e53e3e)' }}>*</span>
+                    Language <span style={{ color: 'var(--danger)' }}>*</span>
                   </label>
                   <select
                     className="form-control"
@@ -573,7 +573,7 @@ export default function TemplatesPage() {
 
                           <button
                             className="btn btn-sm btn-outline"
-                            style={{ fontSize: 12, padding: '2px 8px', color: 'var(--danger, #e53e3e)', borderColor: 'var(--danger, #e53e3e)' }}
+                            style={{ fontSize: 12, padding: '2px 8px', color: 'var(--danger)', borderColor: 'var(--danger)' }}
                             onClick={() => handleDeleteAttachment(att)}
                           >
                             Remove
@@ -606,7 +606,7 @@ export default function TemplatesPage() {
 
             <div className="modal-footer">
               {saveError && (
-                <span style={{ color: 'var(--danger, #e53e3e)', fontSize: 13, marginRight: 'auto' }}>{saveError}</span>
+                <span style={{ color: 'var(--danger)', fontSize: 13, marginRight: 'auto' }}>{saveError}</span>
               )}
               <button className="btn btn-outline" onClick={() => setShowEditor(false)}>Cancel</button>
               {isEditingPersonal ? (
@@ -679,7 +679,7 @@ export default function TemplatesPage() {
               </div>
 
               <div className="form-group">
-                <label>Topic Text <span style={{ color: 'var(--danger, #e53e3e)' }}>*</span></label>
+                <label>Topic Text <span style={{ color: 'var(--danger)' }}>*</span></label>
                 <textarea
                   className="form-control"
                   rows={5}
@@ -692,7 +692,7 @@ export default function TemplatesPage() {
 
             <div className="modal-footer">
               {topicSaveError && (
-                <span style={{ color: 'var(--danger, #e53e3e)', fontSize: 13, marginRight: 'auto' }}>{topicSaveError}</span>
+                <span style={{ color: 'var(--danger)', fontSize: 13, marginRight: 'auto' }}>{topicSaveError}</span>
               )}
               <button className="btn btn-outline" onClick={() => setShowTopicEditor(false)}>Cancel</button>
               <button className="btn btn-outline" onClick={() => handleSaveTopic(false)}>

@@ -1,20 +1,25 @@
 from pathlib import Path
 from typing import Optional, List
 import uuid
+import secrets
 import bcrypt as _bcrypt
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.auth import get_current_user, require_role
-from app.models.models import Employee, RoleEnum, ApprovalStatusEnum, EmployeeSiteLanguage, SiteLanguage, AuditLog, FileUpload
-from app.models.models import BusinessArea, Team, Site
+from app.core.rate_limit import login_limiter
+from app.models.models import (
+    Employee, RoleEnum, ApprovalStatusEnum, EmployeeSiteLanguage, SiteLanguage,
+    AuditLog, FileUpload, BusinessArea, Team, Site, ExpertiseTag,
+)
 from app.schemas.schemas import (
     EmployeeOut, EmployeeCreate, EmployeeUpdate, EmployeeSelfUpdate,
     EmployeeTargetUpdate, EmployeeApprovalRequest, EmployeeSiteLanguageOut,
     EmployeeRoleUpdate, ConsultantUploadSummary, FileUploadOut,
     BulkDeactivateRequest, BulkUpdateRequest, BulkOperationResult,
+    ExpertiseTagOut,
 )
 from app.services.excel_import import ExcelImportService
 
@@ -54,8 +59,11 @@ def _to_out(emp: Employee) -> EmployeeOut:
         team_name=emp.team.name if emp.team else None,
         business_area_name=emp.business_area.name if emp.business_area else None,
         site_name=emp.site.name if emp.site else None,
+        site_country_code=emp.site.country_code if emp.site else None,
         uploaded_batch_id=emp.uploaded_batch_id,
+        can_campaign=getattr(emp, "can_campaign", False) or False,
         site_languages=sl_list,
+        must_change_password=getattr(emp, "must_change_password", False) or False,
         created_at=emp.created_at,
     )
 
@@ -116,6 +124,32 @@ def list_employees(
     if role:
         query = query.filter(Employee.role == role)
     return [_to_out(e) for e in query.order_by(Employee.name).all()]
+
+
+@router.get("/redirect-targets")
+def list_redirect_targets(
+    db: Session = Depends(get_db),
+    current_user: Employee = Depends(get_current_user),
+):
+    """Return active consultants for outreach redirect. Bypasses role hierarchy."""
+    employees = (
+        db.query(Employee)
+        .filter(
+            Employee.is_active == True,
+            Employee.approval_status == ApprovalStatusEnum.APPROVED,
+        )
+        .order_by(Employee.name)
+        .all()
+    )
+    return [
+        {
+            "id": e.id,
+            "name": e.name,
+            "team_name": e.team.name if e.team else None,
+            "business_area_name": e.business_area.name if e.business_area else None,
+        }
+        for e in employees
+    ]
 
 
 @router.get("/batch-uploads", response_model=List[FileUploadOut])
@@ -419,6 +453,12 @@ def bulk_update(
         if data.profile_description is not None and data.profile_description != emp.profile_description:
             emp.profile_description = data.profile_description
             changes.append("profile_description")
+        if data.domain_expertise_tags is not None and data.domain_expertise_tags != emp.domain_expertise_tags:
+            emp.domain_expertise_tags = data.domain_expertise_tags
+            changes.append("domain_expertise_tags")
+        if data.relevance_tags is not None and data.relevance_tags != emp.relevance_tags:
+            emp.relevance_tags = data.relevance_tags
+            changes.append("relevance_tags")
 
         if changes:
             db.add(AuditLog(
@@ -443,13 +483,47 @@ def update_my_profile(
     db: Session = Depends(get_db),
     current_user: Employee = Depends(get_current_user),
 ):
-    """Allow any authenticated employee to update their own profile description and expertise tags."""
+    """Allow any authenticated employee to update their own profile."""
     update_data = data.model_dump(exclude_unset=True)
+
+    # Audit log for name/email changes
+    if "name" in update_data and update_data["name"] != current_user.name:
+        db.add(AuditLog(
+            employee_id=current_user.id,
+            action="update_own_name",
+            entity_type="employee",
+            entity_id=current_user.id,
+            old_value=current_user.name,
+            new_value=update_data["name"],
+        ))
+    if "email" in update_data and update_data["email"] != current_user.email:
+        db.add(AuditLog(
+            employee_id=current_user.id,
+            action="update_own_email",
+            entity_type="employee",
+            entity_id=current_user.id,
+            old_value=current_user.email,
+            new_value=update_data["email"],
+        ))
+
     for key, value in update_data.items():
         setattr(current_user, key, value)
     db.commit()
     db.refresh(current_user)
     return _to_out(current_user)
+
+
+@router.get("/expertise-tags", response_model=List[ExpertiseTagOut])
+def list_expertise_tags(
+    search: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: Employee = Depends(get_current_user),
+):
+    """Return all active expertise tags, optionally filtered by search term."""
+    query = db.query(ExpertiseTag).filter(ExpertiseTag.is_active == True)
+    if search and search.strip():
+        query = query.filter(ExpertiseTag.name.ilike(f"%{search.strip()}%"))
+    return query.order_by(ExpertiseTag.name).all()
 
 
 @router.get("/{employee_id}", response_model=EmployeeOut)
@@ -531,6 +605,16 @@ def approve_employee(
     elif current_user.role == RoleEnum.BA_MANAGER:
         if emp.business_area_id != current_user.business_area_id:
             raise HTTPException(status_code=403, detail="Can only approve consultants in your business area")
+
+    # Last-admin guard: prevent rejecting the last admin
+    if data.approval_status == ApprovalStatusEnum.REJECTED and emp.role == RoleEnum.ADMIN:
+        other_admins = db.query(Employee).filter(
+            Employee.role == RoleEnum.ADMIN,
+            Employee.id != emp.id,
+            Employee.is_active == True,
+        ).count()
+        if other_admins == 0:
+            raise HTTPException(status_code=400, detail="Cannot reject the last administrator")
 
     emp.approval_status = data.approval_status
     if data.approval_status == ApprovalStatusEnum.APPROVED:
@@ -772,3 +856,78 @@ def update_employee(
     db.commit()
     db.refresh(emp)
     return _to_out(emp)
+
+
+# ── Campaign access toggle ───────────────────────────────────────────
+
+@router.post("/{employee_id}/toggle-campaign-access")
+def toggle_campaign_access(
+    employee_id: int,
+    db: Session = Depends(get_db),
+    current_user: Employee = Depends(get_current_user),
+):
+    """Admin or BA-manager can grant/revoke campaign outreach access."""
+    if current_user.role not in (RoleEnum.ADMIN, RoleEnum.BA_MANAGER):
+        raise HTTPException(403, "Only admin or BA-manager can change campaign access")
+
+    emp = db.query(Employee).filter(Employee.id == employee_id).first()
+    if not emp:
+        raise HTTPException(404, "Employee not found")
+
+    old_val = getattr(emp, "can_campaign", False)
+    emp.can_campaign = not old_val
+    db.commit()
+    db.refresh(emp)
+    return {"employee_id": emp.id, "can_campaign": emp.can_campaign}
+
+
+# ── Reset password (admin / BA-manager / team-manager) ────────────
+
+@router.post("/{employee_id}/reset-password")
+def reset_employee_password(
+    employee_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: Employee = Depends(
+        require_role(RoleEnum.ADMIN, RoleEnum.BA_MANAGER, RoleEnum.TEAM_MANAGER)
+    ),
+):
+    """Generate a temporary password for an employee. They must change it on next login."""
+    # Rate limiting to prevent abuse
+    client_ip = request.client.host if request.client else "unknown"
+    rate_key = f"reset:{client_ip}"
+    if login_limiter.is_blocked(rate_key):
+        remaining = login_limiter.remaining_seconds(rate_key)
+        raise HTTPException(
+            status_code=429,
+            detail=f"Too many reset attempts. Try again in {remaining} seconds.",
+        )
+
+    emp = db.query(Employee).filter(Employee.id == employee_id).first()
+    if not emp:
+        raise HTTPException(status_code=404, detail="Employee not found")
+
+    # Scope enforcement
+    allowed, reason = _can_manage(current_user, emp)
+    if not allowed:
+        raise HTTPException(status_code=403, detail=reason)
+
+    # Generate a 12-char temporary password
+    temp_password = secrets.token_urlsafe(9)  # ≈12 chars
+    emp.password_hash = _hash_password(temp_password)
+    emp.must_change_password = True
+
+    db.add(AuditLog(
+        employee_id=current_user.id,
+        action="reset_password",
+        entity_type="employee",
+        entity_id=emp.id,
+        details=f"Password reset for {emp.name} by {current_user.name}",
+    ))
+    db.commit()
+
+    return {
+        "employee_id": emp.id,
+        "temporary_password": temp_password,
+        "message": f"Temporary password generated for {emp.name}. They must change it on next login.",
+    }
